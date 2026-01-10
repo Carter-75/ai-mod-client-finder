@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import anime from "animejs";
 import { Bodies, Engine, Render, Runner, World } from "matter-js";
 
@@ -112,6 +112,116 @@ export default function Home() {
 
   useMatterBackground(backgroundRef);
 
+  const updateLogs = useCallback((nextEntry: LogEntry) => {
+    setLogs((prev) => {
+      const combined = [...prev, nextEntry];
+      return combined.slice(Math.max(combined.length - LOG_LIMIT, 0));
+    });
+  }, []);
+
+  const consumeFiles = useCallback(
+    (files: FileList) => {
+      if (sessionId) {
+        setStatusMessage("Reset workspace to scan a new list of mods.");
+        return;
+      }
+      const next = new Set(jarNames);
+      const rejected: string[] = [];
+      Array.from(files).forEach((file) => {
+        if (file.name.toLowerCase().endsWith(".jar")) {
+          next.add(file.name);
+        } else {
+          rejected.push(file.name);
+        }
+      });
+      setJarNames(Array.from(next).sort());
+      setRejectedFiles(rejected);
+    },
+    [jarNames, sessionId]
+  );
+
+  const createSessionIfNeeded = useCallback(async () => {
+    if (sessionId) {
+      return sessionId;
+    }
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jarNames }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error ?? "Failed to create scanning session");
+    }
+    const data = (await response.json()) as { session: SessionSummary };
+    setSessionSummary(data.session);
+    setSessionId(data.session.id);
+    localStorage.setItem(SESSION_STORAGE_KEY, data.session.id);
+    return data.session.id;
+  }, [jarNames, sessionId]);
+
+  const establishEventStream = useCallback(
+    (id: string) => {
+      eventSourceRef.current?.close();
+      const source = new EventSource(`/api/sessions/${id}/events`);
+
+      source.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data) as ScanEvent;
+          if (payload.type === "log") {
+            updateLogs(payload.payload);
+          }
+          if (payload.type === "progress") {
+            setSessionSummary((prev) => (prev ? { ...prev, ...payload.payload } : prev));
+          }
+          if (payload.type === "status") {
+            setSessionSummary((prev) => (prev ? { ...prev, status: payload.payload } : prev));
+          }
+          if (payload.type === "result") {
+            setSessionSummary((prev) => {
+              if (!prev) return prev;
+              const nextState = { ...prev.state, [payload.payload.jar]: payload.payload.verdict };
+              const nextClient = new Set(prev.clientOnly);
+              const nextUnknown = new Set(prev.unknown);
+              if (payload.payload.verdict === "CLIENT") {
+                nextClient.add(payload.payload.jar);
+                nextUnknown.delete(payload.payload.jar);
+              }
+              if (payload.payload.verdict === "UNKNOWN") {
+                nextUnknown.add(payload.payload.jar);
+              }
+              if (payload.payload.verdict !== "CLIENT") {
+                nextClient.delete(payload.payload.jar);
+              }
+              if (payload.payload.verdict !== "UNKNOWN") {
+                nextUnknown.delete(payload.payload.jar);
+              }
+              return {
+                ...prev,
+                state: nextState,
+                clientOnly: Array.from(nextClient).sort(),
+                unknown: Array.from(nextUnknown).sort(),
+              };
+            });
+          }
+          if (payload.type === "snapshot") {
+            setSessionSummary(payload.payload);
+            setJarNames(payload.payload.jarNames);
+          }
+        } catch (error) {
+          console.error("Failed to parse SSE payload", error, event.data);
+        }
+      };
+
+      source.onerror = (error) => {
+        console.warn("Event stream error", error);
+      };
+
+      eventSourceRef.current = source;
+    },
+    [updateLogs]
+  );
+
   useEffect(() => () => {
     eventSourceRef.current?.close();
   }, []);
@@ -151,7 +261,7 @@ export default function Home() {
         localStorage.removeItem(SESSION_STORAGE_KEY);
       }
     })();
-  }, []);
+  }, [establishEventStream]);
 
   useEffect(() => {
     if (!preferenceLoadedRef.current) {
@@ -218,111 +328,8 @@ export default function Home() {
       document.removeEventListener("drop", preventDefault);
       dropZone.removeEventListener("drop", handleDrop);
     };
-  }, [dropRef, sessionId]);
+  }, [consumeFiles, sessionId]);
 
-  function updateLogs(nextEntry: LogEntry) {
-    setLogs((prev) => {
-      const combined = [...prev, nextEntry];
-      return combined.slice(Math.max(combined.length - LOG_LIMIT, 0));
-    });
-  }
-
-  function consumeFiles(files: FileList) {
-    if (sessionId) {
-      setStatusMessage("Reset workspace to scan a new list of mods.");
-      return;
-    }
-    const next = new Set(jarNames);
-    const rejected: string[] = [];
-    Array.from(files).forEach((file) => {
-      if (file.name.toLowerCase().endsWith(".jar")) {
-        next.add(file.name);
-      } else {
-        rejected.push(file.name);
-      }
-    });
-    setJarNames(Array.from(next).sort());
-    setRejectedFiles(rejected);
-  }
-
-  async function createSessionIfNeeded() {
-    if (sessionId) {
-      return sessionId;
-    }
-    const response = await fetch("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jarNames }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.error ?? "Failed to create scanning session");
-    }
-    const data = (await response.json()) as { session: SessionSummary };
-    setSessionSummary(data.session);
-    setSessionId(data.session.id);
-    localStorage.setItem(SESSION_STORAGE_KEY, data.session.id);
-    return data.session.id;
-  }
-
-  function establishEventStream(id: string) {
-    eventSourceRef.current?.close();
-    const source = new EventSource(`/api/sessions/${id}/events`);
-
-    source.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as ScanEvent;
-        if (payload.type === "log") {
-          updateLogs(payload.payload);
-        }
-        if (payload.type === "progress") {
-          setSessionSummary((prev) => (prev ? { ...prev, ...payload.payload } : prev));
-        }
-        if (payload.type === "status") {
-          setSessionSummary((prev) => (prev ? { ...prev, status: payload.payload } : prev));
-        }
-        if (payload.type === "result") {
-          setSessionSummary((prev) => {
-            if (!prev) return prev;
-            const nextState = { ...prev.state, [payload.payload.jar]: payload.payload.verdict };
-            const nextClient = new Set(prev.clientOnly);
-            const nextUnknown = new Set(prev.unknown);
-            if (payload.payload.verdict === "CLIENT") {
-              nextClient.add(payload.payload.jar);
-              nextUnknown.delete(payload.payload.jar);
-            }
-            if (payload.payload.verdict === "UNKNOWN") {
-              nextUnknown.add(payload.payload.jar);
-            }
-            if (payload.payload.verdict !== "CLIENT") {
-              nextClient.delete(payload.payload.jar);
-            }
-            if (payload.payload.verdict !== "UNKNOWN") {
-              nextUnknown.delete(payload.payload.jar);
-            }
-            return {
-              ...prev,
-              state: nextState,
-              clientOnly: Array.from(nextClient).sort(),
-              unknown: Array.from(nextUnknown).sort(),
-            };
-          });
-        }
-        if (payload.type === "snapshot") {
-          setSessionSummary(payload.payload);
-          setJarNames(payload.payload.jarNames);
-        }
-      } catch (error) {
-        console.error("Failed to parse SSE payload", error, event.data);
-      }
-    };
-
-    source.onerror = (error) => {
-      console.warn("Event stream error", error);
-    };
-
-    eventSourceRef.current = source;
-  }
 
   async function startScan() {
     if (jarNames.length === 0) {
@@ -464,9 +471,9 @@ export default function Home() {
                     const input = document.createElement("input");
                     input.type = "file";
                     input.multiple = true;
-                    // @ts-expect-error directory selection for Chromium-based browsers
-                    input.webkitdirectory = true;
                     input.accept = ".jar";
+                    input.setAttribute("webkitdirectory", "");
+                    input.setAttribute("directory", "");
                     input.onchange = () => {
                       if (input.files) {
                         consumeFiles(input.files);
