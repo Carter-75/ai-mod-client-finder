@@ -2,8 +2,7 @@ const allowedFrameAncestors = [
   "'self'",
   'https://carter-portfolio.fyi',
   'https://carter-portfolio.vercel.app',
-  'https://carters-projects-7dd7e086.vercel.app',
-  'https://*.carters-projects-7dd7e086.vercel.app',
+  'https://*.vercel.app',
   'http://localhost:3000',
 ];
 
@@ -21,7 +20,7 @@ const nextConfig = {
           },
           {
             key: 'X-Frame-Options',
-            value: 'ALLOW-FROM https://carter-portfolio.fyi',
+            value: 'ALLOWALL',
           },
         ],
       },
