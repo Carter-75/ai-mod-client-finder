@@ -81,6 +81,10 @@ If the server or browser crashes, reconnecting will automatically resume the ses
 - Set the `OPENAI_API_KEY` environment variable on the server or rely on per-session user input.
 - Persist the `storage/` directory between deployments to maintain resumability.
 
+## License
+
+You are welcome to use the hosted AI Mod Client Finder website for its intended scanning workflow. The source code and bundled assets remain proprietary and may not be copied, modified, redistributed, or incorporated into other projects without written permission. See LICENSE for details.
+
 ## Security & Privacy
 
 - API keys are never logged or written to disk.
