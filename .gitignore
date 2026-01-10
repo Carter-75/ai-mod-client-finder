@@ -1,17 +1,31 @@
 # Dependencies
-/node_modules
-/.pnp
+node_modules/
+.pnp/
 .pnp.js
 
 # Testing
-/coverage
+coverage/
 
 # Next.js
-/.next/
-/out/
+.next/
+out/
 
 # Production
-/build
+build/
+
+# Runtime state & logs
+.openai_key
+storage/
+logs/
+tmp/
+uploads/
+scan_state.json
+scan_results.txt
+scan_unknown.txt
+
+# Playwright
+playwright-report/
+playwright/.cache/
 
 # Misc
 .DS_Store
@@ -24,6 +38,7 @@
 .env.test.local
 .env.production.local
 
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

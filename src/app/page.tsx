@@ -1,960 +1,707 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import anime from "animejs";
+import { Bodies, Engine, Render, Runner, World } from "matter-js";
 
 import styles from "./page.module.css";
 
-type Player = {
-  id: number;
-  name: string;
-  balance: number;
-  color: string;
-};
+import type { LogEntry, ScanEvent, SessionStatus, SessionSummary, Verdict } from "@/types/scanning";
 
-type TransferRecord = {
-  id: string;
-  timestamp: number;
-  amount: number;
-  sourceId: string;
-  targetId: string;
-  sourceName: string;
-  targetName: string;
-  sourceBalanceAfter?: number;
-  targetBalanceAfter?: number;
-  taxBalanceAfter?: number;
-};
-const revertTransactions = (
-  players: Player[],
-  taxBalance: number,
-  history: TransferRecord[],
-  targetId: string
-) => {
-  const playerMap = new Map(players.map((player) => [playerKey(player.id), { ...player }]));
-  let nextTax = taxBalance;
+const API_KEY_STORAGE_KEY = "modScanner.apiKey";
+const SESSION_STORAGE_KEY = "modScanner.sessionId";
+const LOG_LIMIT = 250;
 
-  const targetIndex = history.findIndex((record) => record.id === targetId);
-  if (targetIndex === -1) {
-    return { players, taxBalance, history };
-  }
+interface AdSlotState {
+  enabled: boolean;
+  html?: string;
+}
 
-  const recordsToRevert = history.slice(0, targetIndex + 1);
+function formatTimestamp(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+}
 
-  recordsToRevert.forEach((record) => {
-    const { amount, sourceId, targetId: toId } = record;
+function computeProgress(summary: SessionSummary | null) {
+  if (!summary || summary.total === 0) return 0;
+  return Math.round((summary.processed / summary.total) * 100);
+}
 
-    if (sourceId === BANK_ID) {
-      if (toId === TAX_ID) {
-        nextTax -= amount;
-      } else {
-        const targetPlayer = playerMap.get(toId);
-        if (targetPlayer) {
-          targetPlayer.balance -= amount;
-        }
-      }
-      return;
-    }
-
-    if (toId === BANK_ID) {
-      if (sourceId === TAX_ID) {
-        nextTax += amount;
-      } else {
-        const sourcePlayer = playerMap.get(sourceId);
-        if (sourcePlayer) {
-          sourcePlayer.balance += amount;
-        }
-      }
-      return;
-    }
-
-    if (sourceId === TAX_ID) {
-      const targetPlayer = playerMap.get(toId);
-      if (targetPlayer) {
-        targetPlayer.balance -= amount;
-      }
-      nextTax += amount;
-      return;
-    }
-
-    if (toId === TAX_ID) {
-      const sourcePlayer = playerMap.get(sourceId);
-      if (sourcePlayer) {
-        sourcePlayer.balance += amount;
-      }
-      nextTax -= amount;
-      return;
-    }
-
-    const sourcePlayer = playerMap.get(sourceId);
-    const targetPlayer = playerMap.get(toId);
-    if (sourcePlayer) {
-      sourcePlayer.balance += amount;
-    }
-    if (targetPlayer) {
-      targetPlayer.balance -= amount;
-    }
-  });
-
-  const truncatedHistory = history.slice(targetIndex + 1);
-  return {
-    players: players.map((player) => playerMap.get(playerKey(player.id)) ?? player),
-    taxBalance: nextTax,
-    history: truncatedHistory,
+function verdictBadge(verdict: Verdict) {
+  const mapping: Record<Verdict, string> = {
+    CLIENT: "is-primary",
+    SERVER: "is-info",
+    BOTH: "is-warning",
+    UNKNOWN: "is-dark",
   };
-};
+  return mapping[verdict];
+}
 
-const DENOMINATIONS = [1, 5, 10, 20, 50, 100, 500];
-const MIN_PLAYERS = 2;
-const MAX_PLAYERS = 4;
-const STARTING_BALANCE = 1500;
-const BANK_ID = "bank";
-const TAX_ID = "tax";
-const PLAYER_COLORS = ["#fbbf24", "#7dd3fc", "#c084fc", "#f472b6"] as const;
-const STORAGE_KEY = "monopoly-banker-v1";
-const GAIN_COLOR = "#34d399";
-const LOSS_COLOR = "#f87171";
+function useMatterBackground(containerRef: RefObject<HTMLDivElement>) {
+  useEffect(() => {
+    if (!containerRef.current) return undefined;
 
-const timeFormatter = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-});
+    const width = containerRef.current.clientWidth;
+    const height = 320;
 
-const currencyFormatter = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  maximumFractionDigits: 0,
-});
-
-const formatCurrency = (value: number) => currencyFormatter.format(value);
-
-const playerKey = (id: number) => `player-${id}`;
-
-const createPlayer = (id: number): Player => ({
-  id,
-  name: `Player ${id}`,
-  balance: STARTING_BALANCE,
-  color: PLAYER_COLORS[(id - 1) % PLAYER_COLORS.length],
-});
-
-const buildDefaultPlayers = (count: number = MAX_PLAYERS) =>
-  Array.from({ length: count }, (_, index) => createPlayer(index + 1));
-
-const sanitizePlayers = (maybePlayers: unknown): Player[] => {
-  if (!Array.isArray(maybePlayers)) {
-    return buildDefaultPlayers(MAX_PLAYERS);
-  }
-
-  const trimmed = maybePlayers.slice(0, MAX_PLAYERS);
-  const normalizedLength = Math.min(
-    Math.max(trimmed.length, MIN_PLAYERS),
-    MAX_PLAYERS
-  );
-
-  const sanitized = Array.from({ length: normalizedLength }, (_, index) => {
-    const source = trimmed[index] ?? {};
-    const id = index + 1;
-    const providedName =
-      typeof source.name === "string" ? source.name.trim() : "";
-    const balanceRaw = Number(source.balance);
-    const balance = Number.isFinite(balanceRaw)
-      ? Math.max(0, Math.round(balanceRaw))
-      : STARTING_BALANCE;
-
-    return {
-      id,
-      name: providedName === "" ? `Player ${id}` : providedName,
-      balance,
-      color: PLAYER_COLORS[index % PLAYER_COLORS.length],
-    };
-  });
-
-  return sanitized;
-};
-
-const sanitizeHistory = (maybeHistory: unknown): TransferRecord[] => {
-  if (!Array.isArray(maybeHistory)) {
-    return [];
-  }
-
-  const fallbackBase = Date.now().toString(36);
-  const sanitized: TransferRecord[] = [];
-
-  maybeHistory.slice(0, 10).forEach((entry, index) => {
-    if (typeof entry !== "object" || entry === null) {
-      return;
-    }
-    const amountRaw = Number((entry as Record<string, unknown>).amount);
-    const timestampRaw = Number((entry as Record<string, unknown>).timestamp);
-    const sourceIdRaw = (entry as Record<string, unknown>).sourceId;
-    const targetIdRaw = (entry as Record<string, unknown>).targetId;
-    const sourceNameRaw = (entry as Record<string, unknown>).sourceName;
-    const targetNameRaw = (entry as Record<string, unknown>).targetName;
-
-    if (
-      !Number.isFinite(amountRaw) ||
-      amountRaw <= 0 ||
-      typeof sourceIdRaw !== "string" ||
-      typeof targetIdRaw !== "string"
-    ) {
-      return;
-    }
-
-    sanitized.push({
-      id:
-        typeof (entry as Record<string, unknown>).id === "string"
-          ? ((entry as Record<string, unknown>).id as string)
-          : `${fallbackBase}-${index}`,
-      timestamp: Number.isFinite(timestampRaw) ? timestampRaw : Date.now(),
-      amount: Math.round(amountRaw),
-      sourceId: sourceIdRaw,
-      targetId: targetIdRaw,
-      sourceName:
-        typeof sourceNameRaw === "string" && sourceNameRaw.trim() !== ""
-          ? sourceNameRaw
-          : sourceIdRaw,
-      targetName:
-        typeof targetNameRaw === "string" && targetNameRaw.trim() !== ""
-          ? targetNameRaw
-          : targetIdRaw,
+    const engine = Engine.create();
+    const render = Render.create({
+      element: containerRef.current,
+      engine,
+      options: {
+        width,
+        height,
+        wireframes: false,
+        background: "transparent",
+      },
     });
-  });
 
-  return sanitized;
-};
+    const floor = Bodies.rectangle(width / 2, height + 25, width, 50, {
+      isStatic: true,
+    });
 
-const formatTimestamp = (value: number) =>
-  timeFormatter.format(new Date(value));
+    const bubbles = Array.from({ length: 8 }).map((_, index) =>
+      Bodies.circle(60 + index * (width / 8), 50 + index * 5, 18 + index * 2, {
+        restitution: 0.9,
+        render: { fillStyle: index % 2 === 0 ? "#00c2ff" : "#ddf3ff" },
+      })
+    );
+
+    World.add(engine.world, [floor, ...bubbles]);
+
+    const runner = Runner.create();
+    Runner.run(runner, engine);
+    Render.run(render);
+
+    const resizeHandler = () => {
+      const nextWidth = containerRef.current?.clientWidth ?? width;
+      render.canvas.width = nextWidth;
+      render.options.width = nextWidth;
+    };
+
+    window.addEventListener("resize", resizeHandler);
+
+    return () => {
+      window.removeEventListener("resize", resizeHandler);
+      Render.stop(render);
+      Runner.stop(runner);
+      World.clear(engine.world, false);
+      Engine.clear(engine);
+      render.canvas.remove();
+    };
+  }, [containerRef]);
+}
 
 export default function Home() {
-  const [players, setPlayers] = useState<Player[]>(() =>
-    buildDefaultPlayers(MAX_PLAYERS)
-  );
-  const [taxBalance, setTaxBalance] = useState(0);
-  const [pendingAmount, setPendingAmount] = useState(0);
-  const [customAmount, setCustomAmount] = useState("");
-  const [sourceId, setSourceId] = useState<string>(BANK_ID);
-  const [targetId, setTargetId] = useState<string>(playerKey(1));
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [history, setHistory] = useState<TransferRecord[]>([]);
-  const [hasLoaded, setHasLoaded] = useState(false);
-  const [recentHighlight, setRecentHighlight] = useState<{
-    source: string | null;
-    target: string | null;
-  }>({ source: null, target: null });
+  const [jarNames, setJarNames] = useState<string[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionSummary, setSessionSummary] = useState<SessionSummary | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [apiKey, setApiKey] = useState<string>("");
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [adSlot, setAdSlot] = useState<AdSlotState>({ enabled: false });
+  const [isStarting, setIsStarting] = useState(false);
+  const [rejectedFiles, setRejectedFiles] = useState<string[]>([]);
+  const [rememberKey, setRememberKey] = useState<boolean>(false);
 
-  const nameResetTimers = useRef<
-    Partial<Record<number, ReturnType<typeof setTimeout>>>
-  >({});
-  const recentHighlightTimer = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
+  const dropRef = useRef<HTMLDivElement>(null);
+  const progressRef = useRef<HTMLDivElement>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const backgroundRef = useRef<HTMLDivElement>(null);
+  const preferenceLoadedRef = useRef(false);
 
-  const activePlayers = players;
+  useMatterBackground(backgroundRef);
 
-  const clearScheduledReset = (id: number) => {
-    const pending = nameResetTimers.current[id];
-    if (pending) {
-      clearTimeout(pending);
-      delete nameResetTimers.current[id];
-    }
-  };
+  useEffect(() => () => {
+    eventSourceRef.current?.close();
+  }, []);
 
-  const scheduleNameReset = (id: number) => {
-    clearScheduledReset(id);
-    nameResetTimers.current[id] = setTimeout(() => {
-      setPlayers((previous) =>
-        previous.map((player) =>
-          player.id === id && player.name.trim() === ""
-            ? { ...player, name: `Player ${id}` }
-            : player
-        )
-      );
-      delete nameResetTimers.current[id];
-    }, 3000);
-  };
-
-  const clearAllNameResetTimers = useCallback(() => {
-    Object.values(nameResetTimers.current).forEach((timer) => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-    });
-  }, [nameResetTimers]);
-
-  const handlePlayerCountChange = (count: number) => {
-    const normalized = Math.min(Math.max(count, MIN_PLAYERS), MAX_PLAYERS);
-    setPlayers((previous) => {
-      if (normalized > previous.length) {
-        const additions = Array.from(
-          { length: normalized - previous.length },
-          (_, index) => createPlayer(previous.length + index + 1)
-        );
-        return [...previous, ...additions];
-      }
-      if (normalized < previous.length) {
-        return previous.slice(0, normalized);
-      }
-      return previous;
-    });
-  };
-
-  const playerCount = activePlayers.length;
+  const processed = sessionSummary?.processed ?? 0;
+  const total = sessionSummary?.total ?? jarNames.length ?? 0;
+  const progressPercent = computeProgress(sessionSummary);
+  const currentStatus: SessionStatus = sessionSummary?.status ?? "idle";
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    const storedKey = localStorage.getItem(API_KEY_STORAGE_KEY);
+    if (storedKey) {
+      setApiKey(storedKey);
+      setRememberKey(true);
+    } else {
+      setRememberKey(false);
+    }
+    preferenceLoadedRef.current = true;
+    const storedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!storedSessionId) {
       return;
     }
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        return;
+    (async () => {
+      try {
+        const response = await fetch(`/api/sessions/${storedSessionId}`);
+        if (!response.ok) {
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+          return;
+        }
+        const data = (await response.json()) as { session: SessionSummary };
+        setSessionId(storedSessionId);
+        setSessionSummary(data.session);
+        setJarNames(data.session.jarNames);
+        establishEventStream(storedSessionId);
+      } catch (error) {
+        console.error("Failed to resume previous session", error);
+        localStorage.removeItem(SESSION_STORAGE_KEY);
       }
-      const parsed = JSON.parse(raw);
-      const nextPlayers = sanitizePlayers(parsed?.players);
-      const parsedTax = Number(parsed?.taxBalance);
-      const nextTax = Number.isFinite(parsedTax)
-        ? Math.max(0, Math.round(parsedTax))
-        : 0;
-      setPlayers(nextPlayers);
-      setTaxBalance(nextTax);
-      const nextHistory = sanitizeHistory(parsed?.history);
-      setHistory(nextHistory);
-    } catch (error) {
-      console.warn("Failed to load Monopoly banker state", error);
-    } finally {
-      setHasLoaded(true);
-    }
+    })();
   }, []);
 
   useEffect(() => {
-    if (!hasLoaded || typeof window === "undefined") {
+    if (!preferenceLoadedRef.current) {
+      return;
+    }
+    if (rememberKey && apiKey) {
+      localStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
+    } else {
+      localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+  }, [rememberKey, apiKey]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch("/api/ads/slot");
+        if (!response.ok) {
+          console.warn("Ad slot request failed", response.statusText);
+          return;
+        }
+        const data = (await response.json()) as AdSlotState;
+        setAdSlot(data);
+      } catch (error) {
+        console.warn("Ad slot unavailable", error);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!progressRef.current) return;
+    anime({
+      targets: progressRef.current,
+      width: `${progressPercent}%`,
+      easing: "easeOutQuad",
+      duration: 500,
+    });
+  }, [progressPercent]);
+
+  useEffect(() => {
+    const preventDefault = (event: DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    const dropZone = dropRef.current;
+    if (!dropZone) return;
+
+    const handleDrop = (event: DragEvent) => {
+      preventDefault(event);
+      if (sessionId) {
+        return;
+      }
+      const files = event.dataTransfer?.files;
+      if (files) {
+        consumeFiles(files);
+      }
+    };
+
+    document.addEventListener("dragover", preventDefault);
+    document.addEventListener("drop", preventDefault);
+    dropZone.addEventListener("drop", handleDrop);
+
+    return () => {
+      document.removeEventListener("dragover", preventDefault);
+      document.removeEventListener("drop", preventDefault);
+      dropZone.removeEventListener("drop", handleDrop);
+    };
+  }, [dropRef, sessionId]);
+
+  function updateLogs(nextEntry: LogEntry) {
+    setLogs((prev) => {
+      const combined = [...prev, nextEntry];
+      return combined.slice(Math.max(combined.length - LOG_LIMIT, 0));
+    });
+  }
+
+  function consumeFiles(files: FileList) {
+    if (sessionId) {
+      setStatusMessage("Reset workspace to scan a new list of mods.");
+      return;
+    }
+    const next = new Set(jarNames);
+    const rejected: string[] = [];
+    Array.from(files).forEach((file) => {
+      if (file.name.toLowerCase().endsWith(".jar")) {
+        next.add(file.name);
+      } else {
+        rejected.push(file.name);
+      }
+    });
+    setJarNames(Array.from(next).sort());
+    setRejectedFiles(rejected);
+  }
+
+  async function createSessionIfNeeded() {
+    if (sessionId) {
+      return sessionId;
+    }
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jarNames }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error ?? "Failed to create scanning session");
+    }
+    const data = (await response.json()) as { session: SessionSummary };
+    setSessionSummary(data.session);
+    setSessionId(data.session.id);
+    localStorage.setItem(SESSION_STORAGE_KEY, data.session.id);
+    return data.session.id;
+  }
+
+  function establishEventStream(id: string) {
+    eventSourceRef.current?.close();
+    const source = new EventSource(`/api/sessions/${id}/events`);
+
+    source.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as ScanEvent;
+        if (payload.type === "log") {
+          updateLogs(payload.payload);
+        }
+        if (payload.type === "progress") {
+          setSessionSummary((prev) => (prev ? { ...prev, ...payload.payload } : prev));
+        }
+        if (payload.type === "status") {
+          setSessionSummary((prev) => (prev ? { ...prev, status: payload.payload } : prev));
+        }
+        if (payload.type === "result") {
+          setSessionSummary((prev) => {
+            if (!prev) return prev;
+            const nextState = { ...prev.state, [payload.payload.jar]: payload.payload.verdict };
+            const nextClient = new Set(prev.clientOnly);
+            const nextUnknown = new Set(prev.unknown);
+            if (payload.payload.verdict === "CLIENT") {
+              nextClient.add(payload.payload.jar);
+              nextUnknown.delete(payload.payload.jar);
+            }
+            if (payload.payload.verdict === "UNKNOWN") {
+              nextUnknown.add(payload.payload.jar);
+            }
+            if (payload.payload.verdict !== "CLIENT") {
+              nextClient.delete(payload.payload.jar);
+            }
+            if (payload.payload.verdict !== "UNKNOWN") {
+              nextUnknown.delete(payload.payload.jar);
+            }
+            return {
+              ...prev,
+              state: nextState,
+              clientOnly: Array.from(nextClient).sort(),
+              unknown: Array.from(nextUnknown).sort(),
+            };
+          });
+        }
+        if (payload.type === "snapshot") {
+          setSessionSummary(payload.payload);
+          setJarNames(payload.payload.jarNames);
+        }
+      } catch (error) {
+        console.error("Failed to parse SSE payload", error, event.data);
+      }
+    };
+
+    source.onerror = (error) => {
+      console.warn("Event stream error", error);
+    };
+
+    eventSourceRef.current = source;
+  }
+
+  async function startScan() {
+    if (jarNames.length === 0) {
+      setStatusMessage("Add at least one Fabric mod (.jar) to begin.");
+      return;
+    }
+    if (!apiKey) {
+      setStatusMessage("Enter your OpenAI API key to continue.");
+      return;
+    }
+    setStatusMessage(null);
+    setIsStarting(true);
+    try {
+      const sessionIdentifier = await createSessionIfNeeded();
+      establishEventStream(sessionIdentifier);
+      const response = await fetch(`/api/sessions/${sessionIdentifier}/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.error ?? "Failed to start scanning session");
+      }
+      setStatusMessage("Scanning in progress. You can leave this tab open and return later.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected error starting scan";
+      setStatusMessage(message);
+      updateLogs({
+        level: "error",
+        category: "system",
+        message,
+        timestamp: new Date().toISOString(),
+      });
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  function clearSession() {
+    setSessionId(null);
+    setSessionSummary(null);
+    setLogs([]);
+    setJarNames([]);
+    setStatusMessage(null);
+    setRejectedFiles([]);
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+
+  function removeJar(name: string) {
+    if (sessionId) {
+      setStatusMessage("Reset workspace to edit the mod list.");
+      return;
+    }
+    setJarNames((prev) => prev.filter((jar) => jar !== name));
+    setSessionSummary((prev) => {
+      if (!prev) return prev;
+      const nextState = { ...prev.state };
+      delete nextState[name];
+      return {
+        ...prev,
+        jarNames: prev.jarNames.filter((jar) => jar !== name),
+        clientOnly: prev.clientOnly.filter((jar) => jar !== name),
+        unknown: prev.unknown.filter((jar) => jar !== name),
+        state: nextState,
+        total: Math.max(prev.total - 1, 0),
+        processed: Object.keys(nextState).length,
+      };
+    });
+  }
+
+  async function copyList(list: string[], label: string) {
+    if (!list.length) {
       return;
     }
     try {
-      const payload = JSON.stringify({ players, taxBalance, history });
-      window.localStorage.setItem(STORAGE_KEY, payload);
+      await navigator.clipboard.writeText(list.join("\n"));
+      setStatusMessage(`${label} list copied to clipboard.`);
     } catch (error) {
-      console.warn("Failed to persist Monopoly banker state", error);
+      console.warn("Clipboard copy failed", error);
+      setStatusMessage(`Unable to copy ${label.toLowerCase()} list.`);
     }
-  }, [players, taxBalance, history, hasLoaded]);
+  }
 
-  useEffect(() => {
-    return () => {
-      clearAllNameResetTimers();
-      if (recentHighlightTimer.current) {
-        clearTimeout(recentHighlightTimer.current);
-      }
-    };
-  }, [clearAllNameResetTimers]);
-
-  useEffect(() => {
-    const playerIds = new Set(
-      activePlayers.map((player) => playerKey(player.id))
-    );
-    if (!playerIds.has(sourceId) && sourceId !== BANK_ID && sourceId !== TAX_ID) {
-      const fallback = playerIds.values().next().value ?? BANK_ID;
-      setSourceId(fallback);
-    }
-    if (!playerIds.has(targetId) && targetId !== BANK_ID && targetId !== TAX_ID) {
-      const fallback = playerIds.values().next().value ?? TAX_ID;
-      setTargetId(fallback);
-    }
-  }, [activePlayers, sourceId, targetId]);
-
-  useEffect(() => {
-    const activeIds = new Set(activePlayers.map((player) => player.id));
-    Object.keys(nameResetTimers.current).forEach((key) => {
-      const id = Number(key);
-      if (!activeIds.has(id)) {
-        clearScheduledReset(id);
-      }
-    });
-  }, [activePlayers]);
-
-  const playerOptions = activePlayers.map((player) => ({
-    value: playerKey(player.id),
-    label: `${player.name} (${formatCurrency(player.balance)})`,
-  }));
-
-  const accountOptions = [
-    ...playerOptions,
-    { value: TAX_ID, label: `Tax Pile (${formatCurrency(taxBalance)})` },
-    { value: BANK_ID, label: "Bank (unlimited)" },
-  ];
-
-  const pendingPreviewActive =
-    pendingAmount > 0 && sourceId !== targetId && hasLoaded;
-  const highlightSourceId = pendingPreviewActive
-    ? sourceId
-    : recentHighlight.source;
-  const highlightTargetId = pendingPreviewActive
-    ? targetId
-    : recentHighlight.target;
-  const highlightMode = pendingPreviewActive
-    ? "pending"
-    : recentHighlight.source || recentHighlight.target
-    ? "recent"
-    : null;
-
-  const shortAccountLabel = (id: string) => {
-    if (id === BANK_ID) {
-      return "Bank";
-    }
-    if (id === TAX_ID) {
-      return "Tax Pile";
-    }
-    const player = activePlayers.find((entry) => playerKey(entry.id) === id);
-    return player ? player.name : "Player";
-  };
-
-  const handleRevertToHistory = (checkpointId: string) => {
-    const result = revertTransactions(players, taxBalance, history, checkpointId);
-    if (result.history === history) {
-      return;
-    }
-    setPlayers(result.players);
-    setTaxBalance(result.taxBalance);
-    setHistory(result.history);
-    setFeedback("Reverted to selected checkpoint.");
-    setPendingAmount(0);
-    setCustomAmount("");
-    setSourceId(BANK_ID);
-    setTargetId(playerKey(1));
-  };
-
-  const describeAccount = (id: string) => {
-    if (id === BANK_ID) {
-      return "the bank";
-    }
-    if (id === TAX_ID) {
-      return "the tax pile";
-    }
-    const player = activePlayers.find((entry) => playerKey(entry.id) === id);
-    return player ? player.name : "player";
-  };
-
-  const handlePlayerNameChange = (id: number, name: string) => {
-    setPlayers((previous) =>
-      previous.map((player) =>
-        player.id === id
-          ? {
-              ...player,
-              name,
-            }
-          : player
-      )
-    );
-
-    if (name.trim() === "") {
-      scheduleNameReset(id);
-    } else {
-      clearScheduledReset(id);
-    }
-  };
-
-  const adjustPendingAmount = (delta: number) => {
-    setPendingAmount((previous) => Math.max(0, previous + delta));
-    setFeedback(null);
-  };
-
-  const handleResetBoard = () => {
-    clearAllNameResetTimers();
-    const freshPlayers = buildDefaultPlayers(playerCount);
-    setPlayers(freshPlayers);
-    setTaxBalance(0);
-    setPendingAmount(0);
-    setCustomAmount("");
-    setSourceId(BANK_ID);
-    setTargetId(playerKey(1));
-    setHistory([]);
-    setRecentHighlight({ source: null, target: null });
-    if (recentHighlightTimer.current) {
-      clearTimeout(recentHighlightTimer.current);
-      recentHighlightTimer.current = null;
-    }
-    setFeedback("Board reset to starting balances.");
-  };
-
-  const handleSwapAccounts = () => {
-    if (sourceId === targetId) {
-      return;
-    }
-    setSourceId(targetId);
-    setTargetId(sourceId);
-    setFeedback(null);
-  };
-
-  const applyCustomAmount = () => {
-    const parsed = Number(customAmount);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      setFeedback("Enter a positive custom amount.");
-      return;
-    }
-    setPendingAmount(parsed);
-    setFeedback(null);
-  };
-
-  const resetAmount = () => {
-    setPendingAmount(0);
-    setCustomAmount("");
-    setFeedback(null);
-  };
-
-  const findPlayer = (id: string) =>
-    activePlayers.find((player) => playerKey(player.id) === id);
-
-  const canDebit = (accountId: string, amount: number) => {
-    if (accountId === BANK_ID) {
-      return true;
-    }
-    if (accountId === TAX_ID) {
-      return taxBalance >= amount;
-    }
-    const player = findPlayer(accountId);
-    return !!player && player.balance >= amount;
-  };
-
-  const handleTransaction = () => {
-    if (pendingAmount <= 0) {
-      setFeedback("Choose an amount greater than zero.");
-      return;
-    }
-    if (sourceId === targetId) {
-      setFeedback("Pick different source and destination accounts.");
-      return;
-    }
-    if (!canDebit(sourceId, pendingAmount)) {
-      setFeedback("Insufficient funds in the selected source.");
-      return;
-    }
-
-    const sourceLabel = shortAccountLabel(sourceId);
-    const targetLabel = shortAccountLabel(targetId);
-
-    const nextPlayers = players.map((player) => {
-      const key = playerKey(player.id);
-      let nextBalance = player.balance;
-      if (key === sourceId) {
-        nextBalance -= pendingAmount;
-      }
-      if (key === targetId) {
-        nextBalance += pendingAmount;
-      }
-      return nextBalance === player.balance
-        ? player
-        : { ...player, balance: nextBalance };
-    });
-
-    setPlayers(nextPlayers);
-
-    if (sourceId === TAX_ID) {
-      setTaxBalance((previous) => previous - pendingAmount);
-    }
-    if (targetId === TAX_ID) {
-      setTaxBalance((previous) => previous + pendingAmount);
-    }
-
-    setHistory((previous) => {
-      const record: TransferRecord = {
-        id: `${Date.now().toString(36)}-${Math.random()
-          .toString(36)
-          .slice(2, 8)}`,
-        timestamp: Date.now(),
-        amount: pendingAmount,
-        sourceId,
-        targetId,
-        sourceName: sourceLabel,
-        targetName: targetLabel,
-        sourceBalanceAfter:
-          sourceId === BANK_ID
-            ? undefined
-            : sourceId === TAX_ID
-            ? taxBalance - pendingAmount
-            : nextPlayers.find((player) => playerKey(player.id) === sourceId)
-                ?.balance,
-        targetBalanceAfter:
-          targetId === BANK_ID
-            ? undefined
-            : targetId === TAX_ID
-            ? taxBalance + pendingAmount
-            : nextPlayers.find((player) => playerKey(player.id) === targetId)
-                ?.balance,
-        taxBalanceAfter:
-          sourceId === TAX_ID
-            ? taxBalance - pendingAmount
-            : targetId === TAX_ID
-            ? taxBalance + pendingAmount
-            : undefined,
-      };
-      return [record, ...previous].slice(0, 10);
-    });
-
-    if (recentHighlightTimer.current) {
-      clearTimeout(recentHighlightTimer.current);
-    }
-    setRecentHighlight({ source: sourceId, target: targetId });
-    recentHighlightTimer.current = setTimeout(() => {
-      setRecentHighlight({ source: null, target: null });
-    }, 2500);
-
-    setPendingAmount(0);
-    setCustomAmount("");
-
-    setFeedback(
-      `Moved ${formatCurrency(pendingAmount)} from ${describeAccount(
-        sourceId
-      )} to ${describeAccount(targetId)}.`
-    );
-  };
+  const progressLabel = useMemo(() => `${processed} / ${total} classified`, [processed, total]);
 
   return (
-    <main className={styles.main}>
-      <section className={styles.shell}>
-        <header className={styles.header}>
-          <div>
-            <p className={styles.kicker}>Quick cash flow tracker</p>
-            <h1>Monopoly Banker</h1>
-            <p className={styles.subtitle}>
-              Track 2&ndash;4 players, the tax pile, and an unlimited bank. Start
-              everyone with {formatCurrency(STARTING_BALANCE)} and keep the game
-              moving without pencil math.
-            </p>
-          </div>
-        </header>
-
-        <div className={styles.layout}>
-          <section className={styles.controls}>
-            <div className={styles.card}>
-              <div className={styles.fieldRow}>
-                <label htmlFor="player-count">
-                  Players: <strong>{playerCount}</strong>
-                </label>
-                <input
-                  id="player-count"
-                  type="range"
-                  min={MIN_PLAYERS}
-                  max={MAX_PLAYERS}
-                  value={playerCount}
-                  onChange={(event) =>
-                    handlePlayerCountChange(Number(event.target.value))
-                  }
-                />
-              </div>
-              <p className={styles.helper}>
-                Bank is unlimited, tax pile starts at {formatCurrency(0)}, each
-                player starts at {formatCurrency(STARTING_BALANCE)}.
+    <div className={styles.page}>
+      <section className="section">
+        <div className="container">
+          <div className={styles.hero}>
+            <div>
+              <h1 className="title is-2 has-text-white">Fabric Mod Client Detector</h1>
+              <p className="subtitle is-5 has-text-grey-light">
+                Identify client-only mods before you move your Minecraft world to a dedicated server. Fully resumable,
+                AI-assisted, and crash safe.
               </p>
-              <div className={styles.cardActions}>
-                <button
-                  type="button"
-                  className={styles.resetBoardButton}
-                  onClick={handleResetBoard}
-                >
-                  Reset Board
+              <div className="buttons mt-4">
+                <button className="button is-info is-light" onClick={clearSession} disabled={!sessionId && jarNames.length === 0}>
+                  Reset Workspace
                 </button>
+                <a className="button is-link is-light" href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">
+                  Get an OpenAI API Key
+                </a>
               </div>
             </div>
+            <div className={styles.background} ref={backgroundRef} aria-hidden />
+          </div>
 
-            <div className={styles.card}>
-              <h2>Adjust names</h2>
-              <div className={styles.playerFormGrid}>
-                {activePlayers.map((player) => (
-                  <label key={player.id} className={styles.playerField}>
-                    <span className={styles.playerLabel}>
-                      <span
-                        className={styles.swatch}
-                        style={{ backgroundColor: player.color }}
-                        aria-hidden="true"
-                      />
-                      Player {player.id}
-                    </span>
-                    <input
-                      value={player.name}
-                      maxLength={24}
-                      onChange={(event) =>
-                        handlePlayerNameChange(player.id, event.target.value)
+          <ol className={styles.howTo} aria-label="How to use the Fabric Mod Client Detector">
+            <li>Drop in your mods folder or select it manually; only <code>.jar</code> names are uploaded to the scan session.</li>
+            <li>Provide an OpenAI API key and choose whether to remember it locally on this device.</li>
+            <li>Start the scan and let it run; progress autosaves so you can refresh or return later.</li>
+            <li>Download client-only and unknown mod lists as TXT or ZIP bundles, then share the client pack with players.</li>
+          </ol>
+
+          {adSlot.enabled && adSlot.html && (
+            <div className="columns mt-4">
+              <div className="column is-half-tablet is-one-third-desktop">
+                <div className="box" dangerouslySetInnerHTML={{ __html: adSlot.html }} />
+              </div>
+            </div>
+          )}
+
+          <div className="columns mt-5">
+            <div className="column is-half">
+              <div className="box">
+                <h2 className="title is-5">1. Collect your mods</h2>
+                <div
+                  ref={dropRef}
+                  className={`${styles.dropZone} ${currentStatus === "running" || sessionId ? styles.readonly : ""}`}
+                  onClick={() => {
+                    if (sessionId) {
+                      setStatusMessage("Reset workspace to begin a fresh scan.");
+                      return;
+                    }
+                    const input = document.createElement("input");
+                    input.type = "file";
+                    input.multiple = true;
+                    // @ts-expect-error directory selection for Chromium-based browsers
+                    input.webkitdirectory = true;
+                    input.accept = ".jar";
+                    input.onchange = () => {
+                      if (input.files) {
+                        consumeFiles(input.files);
                       }
-                    />
-                    <small>{formatCurrency(player.balance)}</small>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div className={styles.card}>
-              <h2>Pick an amount</h2>
-              <div className={styles.amountRow}>
-                <div>
-                  <p className={styles.amountLabel}>Pending amount</p>
-                  <p className={styles.amountValue}>
-                    {formatCurrency(pendingAmount)}
-                  </p>
-                </div>
-                <button
-                  className={styles.resetButton}
-                  type="button"
-                  onClick={resetAmount}
-                >
-                  Reset
-                </button>
-              </div>
-              <div className={styles.denominationControls}>
-                {DENOMINATIONS.map((value) => (
-                  <div key={value} className={styles.denomination}>
-                    <button
-                      type="button"
-                      onClick={() => adjustPendingAmount(-value)}
-                    >
-                      &minus;
-                    </button>
-                    <span>${value}</span>
-                    <button
-                      type="button"
-                      onClick={() => adjustPendingAmount(value)}
-                    >
-                      +
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className={styles.customAmount}>
-                <label htmlFor="custom-amount">Custom amount</label>
-                <div>
-                  <input
-                    id="custom-amount"
-                    type="number"
-                    min={1}
-                    value={customAmount}
-                    onChange={(event) => setCustomAmount(event.target.value)}
-                  />
-                  <button type="button" onClick={applyCustomAmount}>
-                    Use
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className={styles.card}>
-              <h2>Transfer money</h2>
-              <div className={styles.transferGrid}>
-                <label>
-                  <span>From</span>
-                  <div className={styles.selectWrapper}>
-                    <select
-                      value={sourceId}
-                      onChange={(event) => setSourceId(event.target.value)}
-                    >
-                      {accountOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </label>
-                <div className={styles.swapCell}>
-                  <button
-                    type="button"
-                    className={styles.swapButton}
-                    onClick={handleSwapAccounts}
-                  >
-                    Swap
-                  </button>
-                </div>
-                <label>
-                  <span>To</span>
-                  <div className={styles.selectWrapper}>
-                    <select
-                      value={targetId}
-                      onChange={(event) => setTargetId(event.target.value)}
-                    >
-                      {accountOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </label>
-              </div>
-              <button
-                className={styles.primary}
-                type="button"
-                onClick={handleTransaction}
-              >
-                Apply Transfer
-              </button>
-              {feedback && <p className={styles.feedback}>{feedback}</p>}
-            </div>
-          </section>
-
-          <section className={styles.balances}>
-            <div className={styles.card}>
-              <h2>Live totals</h2>
-              <div className={styles.balanceGrid}>
-                {activePlayers.map((player) => {
-                  const keyId = playerKey(player.id);
-                  const isGain = highlightTargetId === keyId;
-                  const isLoss = highlightSourceId === keyId;
-                  const borderColor = isGain
-                    ? GAIN_COLOR
-                    : isLoss
-                    ? LOSS_COLOR
-                    : player.color;
-                  const boxShadow = isGain
-                    ? `0 18px 45px ${GAIN_COLOR}55`
-                    : isLoss
-                    ? `0 18px 45px ${LOSS_COLOR}55`
-                    : `0 18px 45px ${player.color}33`;
-                  const playerTagColor = isGain
-                    ? GAIN_COLOR
-                    : isLoss
-                    ? LOSS_COLOR
-                    : player.color;
-                  return (
-                    <article
-                      key={player.id}
-                      className={styles.playerCard}
-                      style={{ borderColor, boxShadow }}
-                    >
-                      <header className={styles.playerCardHeader}>
-                        <span
-                          className={styles.swatch}
-                          style={{ backgroundColor: playerTagColor }}
-                          aria-hidden="true"
-                        />
-                        <div>
-                          <p
-                            className={styles.playerTag}
-                            style={{ color: playerTagColor }}
-                          >
-                            Player {player.id}
-                          </p>
-                          <h3>{player.name}</h3>
-                        </div>
-                      </header>
-                      <p className={styles.balanceValue}>
-                        {formatCurrency(player.balance)}
-                      </p>
-                    </article>
-                  );
-                })}
-                <article
-                  className={styles.playerCard}
-                  style={{
-                    borderColor:
-                      highlightTargetId === TAX_ID
-                        ? GAIN_COLOR
-                        : highlightSourceId === TAX_ID
-                        ? LOSS_COLOR
-                        : undefined,
-                    boxShadow:
-                      highlightTargetId === TAX_ID
-                        ? `0 18px 45px ${GAIN_COLOR}55`
-                        : highlightSourceId === TAX_ID
-                        ? `0 18px 45px ${LOSS_COLOR}55`
-                        : undefined,
+                    };
+                    input.click();
                   }}
                 >
-                  <header>
-                    <p className={styles.playerTag}>Special</p>
-                    <h3>Tax Pile</h3>
-                  </header>
-                  <p className={styles.balanceValue}>
-                    {formatCurrency(taxBalance)}
-                  </p>
-                </article>
-                <article
-                  className={styles.playerCard}
-                  style={{
-                    borderColor:
-                      highlightTargetId === BANK_ID
-                        ? GAIN_COLOR
-                        : highlightSourceId === BANK_ID
-                        ? LOSS_COLOR
-                        : undefined,
-                    boxShadow:
-                      highlightTargetId === BANK_ID
-                        ? `0 18px 45px ${GAIN_COLOR}55`
-                        : highlightSourceId === BANK_ID
-                        ? `0 18px 45px ${LOSS_COLOR}55`
-                        : undefined,
-                  }}
-                >
-                  <header>
-                    <p className={styles.playerTag}>Special</p>
-                    <h3>Bank</h3>
-                  </header>
-                  <p className={styles.balanceValue}>Unlimited</p>
-                </article>
-              </div>
-            </div>
-            <div className={styles.card}>
-              <div className={styles.historyHeader}>
-                <h2>Last 10 moves</h2>
-                {history.length > 0 && (
-                  <p className={styles.historyTimestamp}>
-                    Updated {formatTimestamp(history[0].timestamp)}
-                  </p>
+                  <p className="has-text-weight-semibold">Drag & drop your mods folder or click to browse</p>
+                  <p className="is-size-7 mt-2 has-text-grey">Only .jar files are processed. Existing progress stays intact.</p>
+                </div>
+                {rejectedFiles.length > 0 && (
+                  <article className="message is-warning mt-3">
+                    <div className="message-body">
+                      Ignored non-jar files:
+                      <ul>
+                        {rejectedFiles.map((file) => (
+                          <li key={file}>{file}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </article>
                 )}
-              </div>
-              {history.length === 0 ? (
-                <p className={styles.historyEmpty}>No transfers yet.</p>
-              ) : (
-                <ul className={styles.historyList}>
-                  {history.map((record, index) => (
-                    <li key={record.id} className={styles.historyItem}>
+                <ul className={`mt-4 ${styles.jarList}`}>
+                  {jarNames.map((name) => (
+                    <li key={name} className="is-flex is-justify-content-space-between is-align-items-center">
+                      <span>{name}</span>
                       <div>
-                        <p className={styles.historyNames}>
-                          <span className={styles.historySource}>
-                            {record.sourceName}
+                        {sessionSummary?.state?.[name] && (
+                          <span className={`tag mr-2 ${verdictBadge(sessionSummary.state[name])}`}>
+                            {sessionSummary.state[name]}
                           </span>
-                          <span
-                            className={styles.historyArrow}
-                            aria-hidden="true"
-                          >
-                            →
-                          </span>
-                          <span className={styles.historyTarget}>
-                            {record.targetName}
-                          </span>
-                        </p>
-                        <p className={styles.historyMeta}>
-                          {formatTimestamp(record.timestamp)} ·
-                          <span className={styles.historyAmount}>
-                            {formatCurrency(record.amount)}
-                          </span>
-                        </p>
-                        <p className={styles.historyAccounts}>
-                          {record.sourceBalanceAfter !== undefined && (
-                            <span>
-                              {record.sourceName}: {formatCurrency(record.sourceBalanceAfter)}
-                            </span>
-                          )}
-                          {record.targetBalanceAfter !== undefined && (
-                            <span>
-                              {record.targetName}: {formatCurrency(record.targetBalanceAfter)}
-                            </span>
-                          )}
-                          {record.taxBalanceAfter !== undefined && (
-                            <span>Tax Pile: {formatCurrency(record.taxBalanceAfter)}</span>
-                          )}
-                        </p>
+                        )}
+                        <button
+                          className="delete"
+                          onClick={() => removeJar(name)}
+                          aria-label={`Remove ${name}`}
+                          disabled={Boolean(sessionId)}
+                        />
                       </div>
-                      <button
-                        type="button"
-                        className={styles.revertButton}
-                        onClick={() => handleRevertToHistory(record.id)}
-                      >
-                        Revert here
-                      </button>
                     </li>
                   ))}
                 </ul>
-              )}
+                {jarNames.length === 0 && <p className="has-text-grey is-size-7">No mods added yet.</p>}
+              </div>
+
+              <div className="box mt-4">
+                <h2 className="title is-5">2. Provide your OpenAI credentials</h2>
+                <div className="field">
+                  <label className="label">OpenAI API key</label>
+                  <div className="control">
+                    <input
+                      className="input"
+                      type="password"
+                      placeholder="sk-..."
+                      value={apiKey}
+                      onChange={(event) => setApiKey(event.target.value.trim())}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <p className="help">
+                    Stored locally only. We never transmit or log your key beyond the classification request.
+                  </p>
+                  <div className={styles.toggleRow}>
+                    <label className="checkbox" htmlFor="remember-key-toggle">
+                      <input
+                        id="remember-key-toggle"
+                        type="checkbox"
+                        checked={rememberKey}
+                        onChange={(event) => {
+                          setRememberKey(event.target.checked);
+                          if (!event.target.checked) {
+                            setStatusMessage("Local API key storage disabled and cleared.");
+                          } else {
+                            setStatusMessage("Local API key storage enabled.");
+                          }
+                        }}
+                      />
+                      <span className="ml-2">Remember this key on this device</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="button is-small is-text"
+                      onClick={() => {
+                        setApiKey("");
+                        if (!rememberKey) {
+                          localStorage.removeItem(API_KEY_STORAGE_KEY);
+                        }
+                      }}
+                    >
+                      Clear field
+                    </button>
+                  </div>
+                </div>
+                <button className="button is-primary" onClick={startScan} disabled={isStarting || currentStatus === "running"}>
+                  {currentStatus === "running" ? "Scanning..." : "Start scan"}
+                </button>
+                {statusMessage && <p className="mt-3 has-text-info">{statusMessage}</p>}
+              </div>
             </div>
-          </section>
+
+            <div className="column is-half">
+              <div className="box">
+                <h2 className="title is-5">3. Track progress</h2>
+                <div className={styles.progressShell}>
+                  <div ref={progressRef} className={styles.progressBar} />
+                </div>
+                <div className="is-flex is-justify-content-space-between is-align-items-center mt-2">
+                  <span className="has-text-weight-semibold">{progressLabel}</span>
+                  <span className="tag is-light">{progressPercent}%</span>
+                </div>
+                <dl className="mt-4">
+                  <div className="is-flex is-justify-content-space-between">
+                    <dt>Status</dt>
+                    <dd className={`tag ${styles.statusTag}`}>{currentStatus}</dd>
+                  </div>
+                  <div className="is-flex is-justify-content-space-between">
+                    <dt>Client-only</dt>
+                    <dd>{sessionSummary?.clientOnly.length ?? 0}</dd>
+                  </div>
+                  <div className="is-flex is-justify-content-space-between">
+                    <dt>Unknown</dt>
+                    <dd>{sessionSummary?.unknown.length ?? 0}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="box mt-4">
+                <h3 className="title is-6">Live log</h3>
+                <div className={styles.logPanel}>
+                  {logs.map((log) => (
+                    <div key={`${log.timestamp}-${log.message}-${log.category}`} className={styles.logLine}>
+                      <span className="tag is-light mr-2">{log.category}</span>
+                      <span className={styles.logMessage}>{log.message}</span>
+                      <span className={styles.logTime}>{formatTimestamp(log.timestamp)}</span>
+                    </div>
+                  ))}
+                  {logs.length === 0 && <p className="has-text-grey is-size-7">Logs will appear here as the scan runs.</p>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="columns mt-5">
+            <div className="column">
+              <div className="box">
+                <h3 className="title is-5">Client-only mods</h3>
+                <p className="is-size-7 has-text-grey">Keep these on your personal client. Do not upload to the server.</p>
+                <ul className={styles.resultList}>
+                  {(sessionSummary?.clientOnly ?? []).map((jar) => (
+                    <li key={jar}>
+                      <span>{jar}</span>
+                      <span className="tag is-primary is-light">CLIENT</span>
+                    </li>
+                  ))}
+                </ul>
+                <div className={`${styles.downloadActions} mt-3`}>
+                  <a
+                    className="button is-small is-link"
+                    href={sessionId ? `/api/sessions/${sessionId}/download?type=client` : "#"}
+                    aria-disabled={!sessionId}
+                    tabIndex={!sessionId ? -1 : undefined}
+                  >
+                    Download TXT
+                  </a>
+                  <a
+                    className="button is-small is-link is-light"
+                    href={sessionId ? `/api/sessions/${sessionId}/download?type=client&format=zip` : "#"}
+                    aria-disabled={!sessionId}
+                    tabIndex={!sessionId ? -1 : undefined}
+                  >
+                    Download ZIP bundle
+                  </a>
+                  <button
+                    className="button is-small"
+                    onClick={() => copyList(sessionSummary?.clientOnly ?? [], "Client-only")}
+                    disabled={!sessionSummary?.clientOnly.length}
+                  >
+                    Copy to clipboard
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="column">
+              <div className="box">
+                <h3 className="title is-5">Unknown mods</h3>
+                <p className="is-size-7 has-text-grey">Review these manually. Install on server only when you confirm requirements.</p>
+                <ul className={styles.resultList}>
+                  {(sessionSummary?.unknown ?? []).map((jar) => (
+                    <li key={jar}>
+                      <span>{jar}</span>
+                      <span className="tag is-dark is-light">UNKNOWN</span>
+                    </li>
+                  ))}
+                </ul>
+                <div className={`${styles.downloadActions} mt-3`}>
+                  <a
+                    className="button is-small is-link is-light"
+                    href={sessionId ? `/api/sessions/${sessionId}/download?type=unknown` : "#"}
+                    aria-disabled={!sessionId}
+                    tabIndex={!sessionId ? -1 : undefined}
+                  >
+                    Download TXT
+                  </a>
+                  <a
+                    className="button is-small is-dark"
+                    href={sessionId ? `/api/sessions/${sessionId}/download?type=unknown&format=zip` : "#"}
+                    aria-disabled={!sessionId}
+                    tabIndex={!sessionId ? -1 : undefined}
+                  >
+                    Download ZIP bundle
+                  </a>
+                  <button
+                    className="button is-small"
+                    onClick={() => copyList(sessionSummary?.unknown ?? [], "Unknown")}
+                    disabled={!sessionSummary?.unknown.length}
+                  >
+                    Copy to clipboard
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="box mt-5">
+            <h3 className="title is-5">Next steps</h3>
+            <ol className={styles.nextSteps}>
+              <li>Upload only non-client mods to your new server instance.</li>
+              <li>Distribute the client-only pack to players joining the server.</li>
+              <li>Re-run this scanner whenever you add new mods. Progress persists per session.</li>
+            </ol>
+          </div>
         </div>
       </section>
-    </main>
+    </div>
   );
 }

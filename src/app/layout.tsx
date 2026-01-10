@@ -1,10 +1,11 @@
 import "./globals.css";
 
+import Link from "next/link";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "monopoly",
-  description: "A project named monopoly",
+  title: "Fabric Mod Client Detector",
+  description: "Identify Minecraft Fabric client-only mods before migrating to a server.",
 };
 
 export default function RootLayout({
@@ -12,22 +13,24 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const year = new Date().getFullYear();
   return (
     <html lang="en">
-      <head>
-        {/*
-          The following script tags are for Matter.js and Anime.js.
-          You can uncomment them and start using them in your project.
-          These are powerful animation libraries.
-          Feel free to remove them if you don't need them.
-        */}
-        {/* <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script> */}
-        {/* <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script> */}
-      </head>
       <body>
         {children}
+        <footer className="site-footer">
+          <div className="container is-flex is-justify-content-space-between is-align-items-center is-flex-wrap-wrap">
+            <span className="is-size-7">© {year} Fabric Mod Client Detector</span>
+            <nav className="footer-links">
+              <Link className="is-size-7" href="/privacy">
+                Privacy Policy
+              </Link>
+            </nav>
+          </div>
+        </footer>
       </body>
     </html>
   );
 }
+
 
