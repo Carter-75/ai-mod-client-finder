@@ -12,11 +12,6 @@ const API_KEY_STORAGE_KEY = "modScanner.apiKey";
 const SESSION_STORAGE_KEY = "modScanner.sessionId";
 const LOG_LIMIT = 250;
 
-interface AdSlotState {
-  enabled: boolean;
-  html?: string;
-}
-
 function formatTimestamp(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
@@ -99,7 +94,6 @@ export default function Home() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [apiKey, setApiKey] = useState<string>("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [adSlot, setAdSlot] = useState<AdSlotState>({ enabled: false });
   const [isStarting, setIsStarting] = useState(false);
   const [rejectedFiles, setRejectedFiles] = useState<string[]>([]);
   const [rememberKey, setRememberKey] = useState<boolean>(false);
@@ -275,22 +269,6 @@ export default function Home() {
   }, [rememberKey, apiKey]);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const response = await fetch("/api/ads/slot");
-        if (!response.ok) {
-          console.warn("Ad slot request failed", response.statusText);
-          return;
-        }
-        const data = (await response.json()) as AdSlotState;
-        setAdSlot(data);
-      } catch (error) {
-        console.warn("Ad slot unavailable", error);
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
     if (!progressRef.current) return;
     anime({
       targets: progressRef.current,
@@ -447,14 +425,6 @@ export default function Home() {
             <li>Start the scan and let it run; progress autosaves so you can refresh or return later.</li>
             <li>Download client-only and unknown mod lists as TXT or ZIP bundles, then share the client pack with players.</li>
           </ol>
-
-          {adSlot.enabled && adSlot.html && (
-            <div className="columns mt-4">
-              <div className="column is-half-tablet is-one-third-desktop">
-                <div className="box" dangerouslySetInnerHTML={{ __html: adSlot.html }} />
-              </div>
-            </div>
-          )}
 
           <div className="columns mt-5">
             <div className="column is-half">

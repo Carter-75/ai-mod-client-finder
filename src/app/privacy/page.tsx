@@ -44,8 +44,9 @@ export default function PrivacyPolicyPage() {
           <h2 className="title is-5">Third-Party Services</h2>
           <p>
             The scanner relies on DuckDuckGo search results and OpenAI models to analyse publicly available
-            information about each mod. Optional advertising slots are rendered only when an <code>AD_PROVIDER_KEY</code>
-            environment variable is configured; when disabled, no external ad requests are executed.
+            information about each mod. Optional AdSense auto ads load only when a verified
+            <code className="mx-1">NEXT_PUBLIC_ADSENSE_CLIENT_ID</code> is configured; when disabled, no AdSense
+            scripts are requested.
           </p>
         </section>
 

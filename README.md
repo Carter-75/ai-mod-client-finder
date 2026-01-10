@@ -10,7 +10,7 @@ Identify Minecraft Fabric client-only mods before migrating a world to a dedicat
 - Two-pass OpenAI classification (`gpt-4o-mini`) that mirrors the reference script
 - Structured, real-time logging grouped by category
 - Downloadable client-only and unknown mod lists as TXT or ZIP bundles
-- Optional ad slot that activates only when `AD_PROVIDER_KEY` is provided
+- Optional AdSense auto ads that activate when a verified client ID is configured
 - Browser-side preference toggle for remembering the OpenAI API key
 - Local storage of session ID for seamless resumes
 
@@ -38,7 +38,8 @@ The `postinstall` hook installs the Chromium build used by Playwright. If the in
 2. Fill in the values:
 
 	- `OPENAI_API_KEY` – required at runtime; can also be entered in the UI and stored locally.
-	- `AD_PROVIDER_KEY` – optional. When absent, ad placeholders stay hidden without altering layout.
+	- `NEXT_PUBLIC_ADSENSE_CLIENT_ID` – optional; when provided, AdSense auto ads load after hydration.
+	- `NEXT_PUBLIC_ADSENSE_TEST_MODE` – optional; leave as `on` in development to avoid serving real ads.
 
 `.env` is excluded from version control. Never commit populated environment files or API keys.
 
@@ -70,7 +71,7 @@ If the server or browser crashes, reconnecting will automatically resume the ses
 ## Project Structure Highlights
 
 - `src/server/` – scanning engine, persistence helpers, structured logging
-- `src/app/api/` – Next.js API routes for sessions, streaming events, downloads, and ads
+- `src/app/api/` – Next.js API routes for sessions, streaming events, and downloads
 - `src/app/page.tsx` – client experience with Bulma styling, Anime.js progress animation, and Matter.js background scene
 - `storage/` – session data (gitignored)
 - `logs/` – structured logs (gitignored)
