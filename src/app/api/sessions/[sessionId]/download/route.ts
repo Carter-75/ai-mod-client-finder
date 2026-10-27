@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
-import { promises as fs } from "fs";
 
 import JSZip from "jszip";
 
-import { resolveSessionFile } from "@/server/config";
 import { scanManager } from "@/server/scanner/manager";
 
 export const runtime = "nodejs";
@@ -12,11 +10,12 @@ interface RouteParams {
   params: { sessionId: string };
 }
 
-const FILE_BY_TYPE = {
-  client: "client_only.txt",
-  unknown: "unknown.txt",
-} as const;
+const VALID_TYPES = new Set(["client", "unknown"]);
 
+// Downloads are generated from the session's in-memory results (which are
+// also what gets persisted), never by reading result files back from disk.
+// An empty category after a scan is a real result, so it downloads as an
+// empty list rather than a 404.
 export async function GET(request: Request, { params }: RouteParams) {
   const session = await scanManager.loadSession(params.sessionId);
   if (!session) {
@@ -24,44 +23,44 @@ export async function GET(request: Request, { params }: RouteParams) {
   }
 
   const { searchParams } = new URL(request.url);
-  const type = searchParams.get("type") as keyof typeof FILE_BY_TYPE | null;
+  const type = searchParams.get("type");
   const format = searchParams.get("format") ?? "txt";
-  if (!type || !(type in FILE_BY_TYPE)) {
+  if (!type || !VALID_TYPES.has(type)) {
     return NextResponse.json({ error: "Unknown download type" }, { status: 400 });
   }
 
-  const path = resolveSessionFile(params.sessionId, FILE_BY_TYPE[type]);
-  try {
-    const file = await fs.readFile(path, "utf8");
-    if (format === "zip") {
-      const zip = new JSZip();
-      const normalized = file.trim();
-      const contents = normalized.length > 0 ? normalized : "No entries classified yet.";
-      zip.file(`${type}-mods.txt`, contents);
-      zip.file(
-        `${type}-mods.json`,
-        JSON.stringify({
+  const results = await session.getResults();
+  const entries = (type === "client" ? results.clientOnly : results.unknown).slice().sort();
+  const body = entries.length > 0 ? entries.join("\n") + "\n" : "No entries classified yet.\n";
+
+  if (format === "zip") {
+    const zip = new JSZip();
+    zip.file(`${type}-mods.txt`, body);
+    zip.file(
+      `${type}-mods.json`,
+      JSON.stringify(
+        {
           generatedAt: new Date().toISOString(),
           category: type,
-          entries: normalized.length > 0 ? normalized.split(/\r?\n/) : [],
-        }, null, 2)
-      );
-      const buffer = await zip.generateAsync({ type: "nodebuffer" });
-      return new Response(buffer, {
-        headers: {
-          "Content-Type": "application/zip",
-          "Content-Disposition": `attachment; filename="${type}-mods.zip"`,
+          entries,
         },
-      });
-    }
-
-    return new Response(file, {
+        null,
+        2
+      )
+    );
+    const buffer = await zip.generateAsync({ type: "nodebuffer" });
+    return new Response(buffer, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${type}-mods.txt"`,
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${type}-mods.zip"`,
       },
     });
-  } catch {
-    return NextResponse.json({ error: "No data available yet" }, { status: 404 });
   }
+
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${type}-mods.txt"`,
+    },
+  });
 }

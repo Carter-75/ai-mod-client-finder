@@ -11,9 +11,7 @@ export default function PrivacyPolicyPage() {
     <main className="section">
       <div className="container content">
         <h1 className="title is-3 has-text-white">Privacy Policy</h1>
-        <p className="is-size-6 has-text-grey-light">
-          Last updated on {new Date().toLocaleDateString()}
-        </p>
+        <p className="is-size-6 has-text-grey-light">Last updated: October 2026</p>
 
         <section className="box mt-5">
           <h2 className="title is-5">Data We Collect</h2>
@@ -25,26 +23,30 @@ export default function PrivacyPolicyPage() {
           </p>
           <p>
             We generate intermediate state files (classification results, logs, and progress markers) on the
-            hosting server to guarantee resumability. These state files never include the actual mod JARs and
-            can be deleted at any time from <code>storage/sessions/&lt;session-id&gt;</code>.
+            hosting server so a scan can resume after a refresh. These state files never include the actual
+            mod JARs. On the hosted deployment they live in temporary server storage and can be cleared when
+            the hosting instance recycles, so a resumed session is best effort, not a permanent archive.
           </p>
         </section>
 
         <section className="box mt-5">
           <h2 className="title is-5">OpenAI API Keys</h2>
           <p>
-            Your OpenAI API key is required to mirror the original classification workflow. You may choose to
-            keep the key stored in your browser&apos;s <code>localStorage</code> for quicker re-use or disable
-            storage entirely. The key is forwarded to OpenAI only for the classification prompts described in the
-            documentation and is never persisted on our servers or logs.
+            An OpenAI API key is optional. Mods are classified from Modrinth&apos;s published client and
+            server side data first; a key is used only to classify the mods Modrinth cannot settle. You may
+            choose to keep the key stored in your browser&apos;s <code>localStorage</code> for quicker
+            re-use or disable storage entirely. The key is forwarded to OpenAI only for those fallback
+            classification prompts and is never persisted on our servers or logs.
           </p>
         </section>
 
         <section className="box mt-5">
           <h2 className="title is-5">Third-Party Services</h2>
           <p>
-            The scanner relies on DuckDuckGo search results and OpenAI models to analyse publicly available
-            information about each mod. Optional AdSense auto ads load only when a verified
+            The scanner sends each mod file name to the Modrinth API, which publishes the client and server
+            requirements for most Fabric mods. For mods Modrinth cannot settle, it falls back to Bing search
+            results analysed by OpenAI models, when an API key is available. Optional AdSense auto ads load
+            only when a verified
             <code className="mx-1">NEXT_PUBLIC_ADSENSE_CLIENT_ID</code> is configured; when disabled, no AdSense
             scripts are requested.
           </p>

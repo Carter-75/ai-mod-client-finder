@@ -314,10 +314,6 @@ export default function Home() {
       setStatusMessage("Add at least one Fabric mod (.jar) to begin.");
       return;
     }
-    if (!apiKey) {
-      setStatusMessage("Enter your OpenAI API key to continue.");
-      return;
-    }
     setStatusMessage(null);
     setIsStarting(true);
     try {
@@ -332,7 +328,11 @@ export default function Home() {
         const error = await response.json().catch(() => ({}));
         throw new Error(error.error ?? "Failed to start scanning session");
       }
-      setStatusMessage("Scanning in progress. You can leave this tab open and return later.");
+      setStatusMessage(
+        apiKey
+          ? "Scanning in progress. You can leave this tab open and return later."
+          : "Scanning in progress using Modrinth data. Mods Modrinth cannot settle will be marked Unknown, because no OpenAI key was provided."
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unexpected error starting scan";
       setStatusMessage(message);
@@ -421,7 +421,7 @@ export default function Home() {
 
           <ol className={styles.howTo} aria-label="How to use the Fabric Mod Client Detector">
             <li>Drop in your mods folder or select it manually; only <code>.jar</code> names are uploaded to the scan session.</li>
-            <li>Provide an OpenAI API key and choose whether to remember it locally on this device.</li>
+            <li>Optionally add an OpenAI API key for the mods Modrinth cannot settle from its published side data. Without a key, those mods are marked Unknown instead of guessed.</li>
             <li>Start the scan and let it run; progress autosaves so you can refresh or return later.</li>
             <li>Download client-only and unknown mod lists as TXT or ZIP bundles, then share the client pack with players.</li>
           </ol>
@@ -491,7 +491,7 @@ export default function Home() {
               </div>
 
               <div className="box mt-4">
-                <h2 className="title is-5">2. Provide your OpenAI credentials</h2>
+                <h2 className="title is-5">2. OpenAI API key (optional)</h2>
                 <div className="field">
                   <label className="label">OpenAI API key</label>
                   <div className="control">
@@ -506,7 +506,10 @@ export default function Home() {
                     />
                   </div>
                   <p className="help">
-                    Stored locally only. We never transmit or log your key beyond the classification request.
+                    Most mods are settled from Modrinth data with no key at all. If you provide a key, it is
+                    sent to this server for the scan and forwarded to OpenAI only for the fallback
+                    classification requests. It is never logged or saved on the server. Leaving this blank
+                    uses the server-configured key when one is set.
                   </p>
                   <div className={styles.toggleRow}>
                     <label className="checkbox" htmlFor="remember-key-toggle">

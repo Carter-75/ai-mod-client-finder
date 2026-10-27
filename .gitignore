@@ -42,3 +42,6 @@ playwright/.cache/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# TypeScript build info
+*.tsbuildinfo

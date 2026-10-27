@@ -1,17 +1,1 @@
-{
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "X-Frame-Options",
-          "value": "ALLOWALL"
-        },
-        {
-          "key": "Content-Security-Policy",
-          "value": "frame-ancestors 'self' https://carter-portfolio.fyi https://carter-portfolio.vercel.app https://*.vercel.app http://localhost:3000"
-        }
-      ]
-    }
-  ]
-}
+{"headers":[{"headers":[{"key":"Content-Security-Policy","value":"frame-ancestors 'self' https://carter-portfolio.fyi https://www.carter-portfolio.fyi https://carter-portfolio.vercel.app https://*.vercel.app http://localhost:3000"}],"source":"/(.*)"}]}

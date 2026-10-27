@@ -18,7 +18,7 @@ const AdSenseAutoLoader = () => {
     }
 
     if (!clientId) {
-      console.error("AdSense auto ads skipped. Provide NEXT_PUBLIC_ADSENSE_CLIENT_ID to enable ads.");
+      // Ads are optional and off by default; stay silent when unconfigured.
       return;
     }
 

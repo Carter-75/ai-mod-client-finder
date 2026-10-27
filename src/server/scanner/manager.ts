@@ -1,5 +1,4 @@
-import { promises as fs } from "fs";
-import { ensureInfrastructure, SESSION_STORAGE_ROOT } from "@/server/config";
+import { ensureInfrastructure, isValidSessionId } from "@/server/config";
 import { ScanSession } from "@/server/scanner/session";
 
 interface CreateSessionPayload {
@@ -12,7 +11,13 @@ class ScanManager {
 
   private async init() {
     if (this.initialized) return;
-    await ensureInfrastructure();
+    try {
+      await ensureInfrastructure();
+    } catch (error) {
+      // Storage can be unavailable on serverless hosting. Sessions still
+      // work from memory; disk persistence is best effort.
+      console.warn("Unable to initialize scan storage; continuing in memory only.", error);
+    }
     this.initialized = true;
   }
 
@@ -26,6 +31,9 @@ class ScanManager {
 
   async loadSession(sessionId: string) {
     await this.init();
+    if (!isValidSessionId(sessionId)) {
+      return null;
+    }
     if (this.sessions.has(sessionId)) {
       return this.sessions.get(sessionId)!;
     }
@@ -36,27 +44,12 @@ class ScanManager {
     return session ?? null;
   }
 
-  async listSessionIds() {
-    await this.init();
-    const entries = await fs.readdir(SESSION_STORAGE_ROOT).catch(() => [] as string[]);
-    return entries.filter((folder) => folder.length > 0);
-  }
-
-  async ensureSession(sessionId: string, jarNames?: string[]) {
-    const existing = await this.loadSession(sessionId);
-    if (existing) {
-      return existing;
-    }
-    if (!jarNames?.length) {
-      return null;
-    }
-    const session = await ScanSession.initialize(jarNames);
-    this.sessions.set(session.id, session);
-    return session;
-  }
-
+  // Only real .jar file names are scanned. Directory paths from folder
+  // pickers are reduced to base names, and anything else is dropped.
   private sanitizeJarNames(jarNames: string[]) {
-    const normalized = jarNames.map((name) => name.trim()).filter(Boolean);
+    const normalized = jarNames
+      .map((name) => name.trim().split(/[\\/]/).pop() ?? "")
+      .filter((name) => name.toLowerCase().endsWith(".jar"));
     return Array.from(new Set(normalized));
   }
 }

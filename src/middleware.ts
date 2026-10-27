@@ -20,7 +20,9 @@ export function middleware(request: NextRequest) {
   frameAncestors.push("https://*.vercel.app");
 
   response.headers.set("Content-Security-Policy", `frame-ancestors ${frameAncestors.join(" ")};`);
-  response.headers.set("X-Frame-Options", "ALLOWALL");
+  // No X-Frame-Options header: the previous ALLOWALL value is not a valid
+  // X-Frame-Options directive, and CSP frame-ancestors above is the
+  // supported control for the portfolio embed.
   response.headers.set("Referrer-Policy", "origin-when-cross-origin");
   response.headers.set("X-Content-Type-Options", "nosniff");
 

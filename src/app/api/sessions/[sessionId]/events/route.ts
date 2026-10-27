@@ -25,28 +25,34 @@ export async function GET(_request: Request, { params }: RouteParams) {
   let cleanup: (() => void) | null = null;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const send = (event: ScanEvent) => {
-        controller.enqueue(serializeEvent(event));
+      let closed = false;
+      const safeEnqueue = (chunk: Uint8Array) => {
+        if (closed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          closed = true;
+          cleanup?.();
+        }
       };
 
       const heartbeat = setInterval(() => {
-        controller.enqueue(encoder.encode(`event: ping\ndata: {}\n\n`));
+        safeEnqueue(encoder.encode(`event: ping\ndata: {}\n\n`));
       }, 15000);
 
-      const listener = (event: ScanEvent) => send(event);
+      const listener = (event: ScanEvent) => safeEnqueue(serializeEvent(event));
       session.on("event", listener);
 
-      send({ type: "snapshot", payload: session.getSummary() });
-
-      controller.enqueue(encoder.encode("retry: 2000\n\n"));
-
-      controller.enqueue(
+      safeEnqueue(serializeEvent({ type: "snapshot", payload: session.getSummary() }));
+      safeEnqueue(encoder.encode("retry: 2000\n\n"));
+      safeEnqueue(
         encoder.encode(
           `event: ready\ndata: ${JSON.stringify({ status: session.getSummary().status })}\n\n`
         )
       );
 
       cleanup = () => {
+        closed = true;
         clearInterval(heartbeat);
         session.off("event", listener);
       };

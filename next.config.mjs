@@ -1,6 +1,7 @@
 const allowedFrameAncestors = [
   "'self'",
   'https://carter-portfolio.fyi',
+  'https://www.carter-portfolio.fyi',
   'https://carter-portfolio.vercel.app',
   'https://*.vercel.app',
   'http://localhost:3000',
@@ -17,10 +18,6 @@ const nextConfig = {
           {
             key: 'Content-Security-Policy',
             value: `frame-ancestors ${frameAncestors};`,
-          },
-          {
-            key: 'X-Frame-Options',
-            value: 'ALLOWALL',
           },
         ],
       },
