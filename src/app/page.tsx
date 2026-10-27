@@ -2,24 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import anime from "animejs";
+import JSZip from "jszip";
 import { Bodies, Engine, Render, Runner, World } from "matter-js";
 
 import styles from "./page.module.css";
 
-import type { LogEntry, ScanEvent, SessionStatus, SessionSummary, Verdict } from "@/types/scanning";
+import type { ClassifyResponse, LogEntry, Verdict } from "@/types/scanning";
 
 const API_KEY_STORAGE_KEY = "modScanner.apiKey";
-const SESSION_STORAGE_KEY = "modScanner.sessionId";
+const JARS_STORAGE_KEY = "modScanner.jars";
+const RESULTS_STORAGE_KEY = "modScanner.results";
 const LOG_LIMIT = 250;
+
+type ScanStatus = "idle" | "running" | "paused" | "completed";
 
 function formatTimestamp(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
-}
-
-function computeProgress(summary: SessionSummary | null) {
-  if (!summary || summary.total === 0) return 0;
-  return Math.round((summary.processed / summary.total) * 100);
 }
 
 function verdictBadge(verdict: Verdict) {
@@ -89,34 +88,57 @@ function useMatterBackground(containerRef: RefObject<HTMLDivElement>) {
 
 export default function Home() {
   const [jarNames, setJarNames] = useState<string[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionSummary, setSessionSummary] = useState<SessionSummary | null>(null);
+  const [results, setResults] = useState<Record<string, Verdict>>({});
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [apiKey, setApiKey] = useState<string>("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [isStarting, setIsStarting] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   const [rejectedFiles, setRejectedFiles] = useState<string[]>([]);
   const [rememberKey, setRememberKey] = useState<boolean>(false);
 
   const dropRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
   const backgroundRef = useRef<HTMLDivElement>(null);
   const preferenceLoadedRef = useRef(false);
+  const stopRequestedRef = useRef(false);
+  const keyRejectedRef = useRef(false);
 
   useMatterBackground(backgroundRef);
 
-  const updateLogs = useCallback((nextEntry: LogEntry) => {
+  const clientOnly = useMemo(
+    () => jarNames.filter((jar) => results[jar] === "CLIENT"),
+    [jarNames, results]
+  );
+  const unknown = useMemo(
+    () => jarNames.filter((jar) => results[jar] === "UNKNOWN"),
+    [jarNames, results]
+  );
+  const processed = useMemo(
+    () => jarNames.filter((jar) => results[jar]).length,
+    [jarNames, results]
+  );
+  const total = jarNames.length;
+  const progressPercent = total === 0 ? 0 : Math.round((processed / total) * 100);
+  const currentStatus: ScanStatus = isScanning
+    ? "running"
+    : total > 0 && processed === total
+      ? "completed"
+      : processed > 0
+        ? "paused"
+        : "idle";
+
+  const appendLogs = useCallback((entries: LogEntry[]) => {
+    if (entries.length === 0) return;
     setLogs((prev) => {
-      const combined = [...prev, nextEntry];
+      const combined = [...prev, ...entries];
       return combined.slice(Math.max(combined.length - LOG_LIMIT, 0));
     });
   }, []);
 
   const consumeFiles = useCallback(
     (files: FileList) => {
-      if (sessionId) {
-        setStatusMessage("Reset workspace to scan a new list of mods.");
+      if (isScanning) {
+        setStatusMessage("Stop the current scan to change the mod list.");
         return;
       }
       const next = new Set(jarNames);
@@ -131,100 +153,10 @@ export default function Home() {
       setJarNames(Array.from(next).sort());
       setRejectedFiles(rejected);
     },
-    [jarNames, sessionId]
+    [jarNames, isScanning]
   );
 
-  const createSessionIfNeeded = useCallback(async () => {
-    if (sessionId) {
-      return sessionId;
-    }
-    const response = await fetch("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jarNames }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.error ?? "Failed to create scanning session");
-    }
-    const data = (await response.json()) as { session: SessionSummary };
-    setSessionSummary(data.session);
-    setSessionId(data.session.id);
-    localStorage.setItem(SESSION_STORAGE_KEY, data.session.id);
-    return data.session.id;
-  }, [jarNames, sessionId]);
-
-  const establishEventStream = useCallback(
-    (id: string) => {
-      eventSourceRef.current?.close();
-      const source = new EventSource(`/api/sessions/${id}/events`);
-
-      source.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data) as ScanEvent;
-          if (payload.type === "log") {
-            updateLogs(payload.payload);
-          }
-          if (payload.type === "progress") {
-            setSessionSummary((prev) => (prev ? { ...prev, ...payload.payload } : prev));
-          }
-          if (payload.type === "status") {
-            setSessionSummary((prev) => (prev ? { ...prev, status: payload.payload } : prev));
-          }
-          if (payload.type === "result") {
-            setSessionSummary((prev) => {
-              if (!prev) return prev;
-              const nextState = { ...prev.state, [payload.payload.jar]: payload.payload.verdict };
-              const nextClient = new Set(prev.clientOnly);
-              const nextUnknown = new Set(prev.unknown);
-              if (payload.payload.verdict === "CLIENT") {
-                nextClient.add(payload.payload.jar);
-                nextUnknown.delete(payload.payload.jar);
-              }
-              if (payload.payload.verdict === "UNKNOWN") {
-                nextUnknown.add(payload.payload.jar);
-              }
-              if (payload.payload.verdict !== "CLIENT") {
-                nextClient.delete(payload.payload.jar);
-              }
-              if (payload.payload.verdict !== "UNKNOWN") {
-                nextUnknown.delete(payload.payload.jar);
-              }
-              return {
-                ...prev,
-                state: nextState,
-                clientOnly: Array.from(nextClient).sort(),
-                unknown: Array.from(nextUnknown).sort(),
-              };
-            });
-          }
-          if (payload.type === "snapshot") {
-            setSessionSummary(payload.payload);
-            setJarNames(payload.payload.jarNames);
-          }
-        } catch (error) {
-          console.error("Failed to parse SSE payload", error, event.data);
-        }
-      };
-
-      source.onerror = (error) => {
-        console.warn("Event stream error", error);
-      };
-
-      eventSourceRef.current = source;
-    },
-    [updateLogs]
-  );
-
-  useEffect(() => () => {
-    eventSourceRef.current?.close();
-  }, []);
-
-  const processed = sessionSummary?.processed ?? 0;
-  const total = sessionSummary?.total ?? jarNames.length ?? 0;
-  const progressPercent = computeProgress(sessionSummary);
-  const currentStatus: SessionStatus = sessionSummary?.status ?? "idle";
-
+  // Load persisted workspace (mod list, results, remembered key) once.
   useEffect(() => {
     const storedKey = localStorage.getItem(API_KEY_STORAGE_KEY);
     if (storedKey) {
@@ -233,29 +165,31 @@ export default function Home() {
     } else {
       setRememberKey(false);
     }
-    preferenceLoadedRef.current = true;
-    const storedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!storedSessionId) {
-      return;
-    }
-    (async () => {
-      try {
-        const response = await fetch(`/api/sessions/${storedSessionId}`);
-        if (!response.ok) {
-          localStorage.removeItem(SESSION_STORAGE_KEY);
-          return;
-        }
-        const data = (await response.json()) as { session: SessionSummary };
-        setSessionId(storedSessionId);
-        setSessionSummary(data.session);
-        setJarNames(data.session.jarNames);
-        establishEventStream(storedSessionId);
-      } catch (error) {
-        console.error("Failed to resume previous session", error);
-        localStorage.removeItem(SESSION_STORAGE_KEY);
+    try {
+      const storedJars = JSON.parse(localStorage.getItem(JARS_STORAGE_KEY) ?? "[]") as string[];
+      const storedResults = JSON.parse(localStorage.getItem(RESULTS_STORAGE_KEY) ?? "{}") as Record<string, Verdict>;
+      if (Array.isArray(storedJars)) {
+        setJarNames(storedJars.filter((jar) => typeof jar === "string"));
       }
-    })();
-  }, [establishEventStream]);
+      if (storedResults && typeof storedResults === "object") {
+        setResults(storedResults);
+      }
+    } catch {
+      localStorage.removeItem(JARS_STORAGE_KEY);
+      localStorage.removeItem(RESULTS_STORAGE_KEY);
+    }
+    preferenceLoadedRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!preferenceLoadedRef.current) return;
+    localStorage.setItem(JARS_STORAGE_KEY, JSON.stringify(jarNames));
+  }, [jarNames]);
+
+  useEffect(() => {
+    if (!preferenceLoadedRef.current) return;
+    localStorage.setItem(RESULTS_STORAGE_KEY, JSON.stringify(results));
+  }, [results]);
 
   useEffect(() => {
     if (!preferenceLoadedRef.current) {
@@ -288,7 +222,7 @@ export default function Home() {
 
     const handleDrop = (event: DragEvent) => {
       preventDefault(event);
-      if (sessionId) {
+      if (isScanning) {
         return;
       }
       const files = event.dataTransfer?.files;
@@ -306,78 +240,100 @@ export default function Home() {
       document.removeEventListener("drop", preventDefault);
       dropZone.removeEventListener("drop", handleDrop);
     };
-  }, [consumeFiles, sessionId]);
-
+  }, [consumeFiles, isScanning]);
 
   async function startScan() {
     if (jarNames.length === 0) {
       setStatusMessage("Add at least one Fabric mod (.jar) to begin.");
       return;
     }
+    const pending = jarNames.filter((jar) => !results[jar]);
+    if (pending.length === 0) {
+      setStatusMessage("Every mod in the list is already classified. Reset the workspace to start over.");
+      return;
+    }
     setStatusMessage(null);
-    setIsStarting(true);
+    stopRequestedRef.current = false;
+    keyRejectedRef.current = false;
+    setIsScanning(true);
+    let keyWasRejected = false;
     try {
-      const sessionIdentifier = await createSessionIfNeeded();
-      establishEventStream(sessionIdentifier);
-      const response = await fetch(`/api/sessions/${sessionIdentifier}/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey }),
-      });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.error ?? "Failed to start scanning session");
+      for (const jar of pending) {
+        if (stopRequestedRef.current) {
+          setStatusMessage("Scan stopped. Classified results are saved in this browser; start again any time to continue.");
+          break;
+        }
+        let data: ClassifyResponse;
+        try {
+          const response = await fetch("/api/classify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jar, apiKey: keyWasRejected ? "" : apiKey || undefined }),
+          });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error ?? `Classification request failed (HTTP ${response.status})`);
+          }
+          data = (await response.json()) as ClassifyResponse;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unexpected error during classification";
+          appendLogs([
+            {
+              level: "error",
+              category: "system",
+              message: `Could not classify ${jar}: ${message}. Marked UNKNOWN; you can reset and retry.`,
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+          setResults((prev) => ({ ...prev, [jar]: "UNKNOWN" }));
+          continue;
+        }
+        appendLogs(data.logs);
+        if (data.keyRejected) {
+          keyWasRejected = true;
+          keyRejectedRef.current = true;
+        }
+        setResults((prev) => ({ ...prev, [jar]: data.verdict }));
       }
-      setStatusMessage(
-        apiKey
-          ? "Scanning in progress. You can leave this tab open and return later."
-          : "Scanning in progress using Modrinth data. Mods Modrinth cannot settle will be marked Unknown, because no OpenAI key was provided."
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unexpected error starting scan";
-      setStatusMessage(message);
-      updateLogs({
-        level: "error",
-        category: "system",
-        message,
-        timestamp: new Date().toISOString(),
-      });
+      if (!stopRequestedRef.current) {
+        setStatusMessage(
+          keyRejectedRef.current
+            ? "Scan finished. OpenAI rejected the API key, so mods Modrinth could not settle are marked Unknown."
+            : apiKey
+              ? "Scan finished. Results are saved in this browser."
+              : "Scan finished using Modrinth data. Mods Modrinth could not settle are marked Unknown, because no OpenAI key was provided. Results are saved in this browser."
+        );
+      }
     } finally {
-      setIsStarting(false);
+      setIsScanning(false);
     }
   }
 
-  function clearSession() {
-    setSessionId(null);
-    setSessionSummary(null);
+  function stopScan() {
+    stopRequestedRef.current = true;
+  }
+
+  function clearWorkspace() {
+    stopRequestedRef.current = true;
+    setResults({});
     setLogs([]);
     setJarNames([]);
     setStatusMessage(null);
     setRejectedFiles([]);
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-    localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(JARS_STORAGE_KEY);
+    localStorage.removeItem(RESULTS_STORAGE_KEY);
   }
 
   function removeJar(name: string) {
-    if (sessionId) {
-      setStatusMessage("Reset workspace to edit the mod list.");
+    if (isScanning) {
+      setStatusMessage("Stop the current scan to edit the mod list.");
       return;
     }
     setJarNames((prev) => prev.filter((jar) => jar !== name));
-    setSessionSummary((prev) => {
-      if (!prev) return prev;
-      const nextState = { ...prev.state };
-      delete nextState[name];
-      return {
-        ...prev,
-        jarNames: prev.jarNames.filter((jar) => jar !== name),
-        clientOnly: prev.clientOnly.filter((jar) => jar !== name),
-        unknown: prev.unknown.filter((jar) => jar !== name),
-        state: nextState,
-        total: Math.max(prev.total - 1, 0),
-        processed: Object.keys(nextState).length,
-      };
+    setResults((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
     });
   }
 
@@ -394,7 +350,37 @@ export default function Home() {
     }
   }
 
-  const progressLabel = useMemo(() => `${processed} / ${total} classified`, [processed, total]);
+  async function downloadList(type: "client" | "unknown", format: "txt" | "zip") {
+    const entries = (type === "client" ? clientOnly : unknown).slice().sort();
+    const body = entries.length > 0 ? entries.join("\n") + "\n" : "No entries classified yet.\n";
+    let blob: Blob;
+    let filename: string;
+    if (format === "zip") {
+      const zip = new JSZip();
+      zip.file(`${type}-mods.txt`, body);
+      zip.file(
+        `${type}-mods.json`,
+        JSON.stringify(
+          { generatedAt: new Date().toISOString(), category: type, entries },
+          null,
+          2
+        )
+      );
+      blob = await zip.generateAsync({ type: "blob" });
+      filename = `${type}-mods.zip`;
+    } else {
+      blob = new Blob([body], { type: "text/plain; charset=utf-8" });
+      filename = `${type}-mods.txt`;
+    }
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const progressLabel = `${processed} / ${total} classified`;
 
   return (
     <div className={styles.page}>
@@ -404,11 +390,11 @@ export default function Home() {
             <div>
               <h1 className="title is-2 has-text-white">Fabric Mod Client Detector</h1>
               <p className="subtitle is-5 has-text-grey-light">
-                Identify client-only mods before you move your Minecraft world to a dedicated server. Fully resumable,
-                AI-assisted, and crash safe.
+                Identify client-only mods before you move your Minecraft world to a dedicated server. Classified
+                from Modrinth data first, with an optional AI fallback, and your results saved in this browser.
               </p>
               <div className="buttons mt-4">
-                <button className="button is-info is-light" onClick={clearSession} disabled={!sessionId && jarNames.length === 0}>
+                <button className="button is-info is-light" onClick={clearWorkspace} disabled={jarNames.length === 0}>
                   Reset Workspace
                 </button>
                 <a className="button is-link is-light" href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">
@@ -420,9 +406,9 @@ export default function Home() {
           </div>
 
           <ol className={styles.howTo} aria-label="How to use the Fabric Mod Client Detector">
-            <li>Drop in your mods folder or select it manually; only <code>.jar</code> names are uploaded to the scan session.</li>
+            <li>Drop in your mods folder or select it manually; only <code>.jar</code> file names are sent for classification, never the files themselves.</li>
             <li>Optionally add an OpenAI API key for the mods Modrinth cannot settle from its published side data. Without a key, those mods are marked Unknown instead of guessed.</li>
-            <li>Start the scan and let it run; progress autosaves so you can refresh or return later.</li>
+            <li>Start the scan. Each mod is classified one request at a time, and progress autosaves in this browser so you can refresh or return later.</li>
             <li>Download client-only and unknown mod lists as TXT or ZIP bundles, then share the client pack with players.</li>
           </ol>
 
@@ -432,10 +418,10 @@ export default function Home() {
                 <h2 className="title is-5">1. Collect your mods</h2>
                 <div
                   ref={dropRef}
-                  className={`${styles.dropZone} ${currentStatus === "running" || sessionId ? styles.readonly : ""}`}
+                  className={`${styles.dropZone} ${isScanning ? styles.readonly : ""}`}
                   onClick={() => {
-                    if (sessionId) {
-                      setStatusMessage("Reset workspace to begin a fresh scan.");
+                    if (isScanning) {
+                      setStatusMessage("Stop the current scan to change the mod list.");
                       return;
                     }
                     const input = document.createElement("input");
@@ -472,16 +458,16 @@ export default function Home() {
                     <li key={name} className="is-flex is-justify-content-space-between is-align-items-center">
                       <span>{name}</span>
                       <div>
-                        {sessionSummary?.state?.[name] && (
-                          <span className={`tag mr-2 ${verdictBadge(sessionSummary.state[name])}`}>
-                            {sessionSummary.state[name]}
+                        {results[name] && (
+                          <span className={`tag mr-2 ${verdictBadge(results[name])}`}>
+                            {results[name]}
                           </span>
                         )}
                         <button
                           className="delete"
                           onClick={() => removeJar(name)}
                           aria-label={`Remove ${name}`}
-                          disabled={Boolean(sessionId)}
+                          disabled={isScanning}
                         />
                       </div>
                     </li>
@@ -507,9 +493,9 @@ export default function Home() {
                   </div>
                   <p className="help">
                     Most mods are settled from Modrinth data with no key at all. If you provide a key, it is
-                    sent to this server for the scan and forwarded to OpenAI only for the fallback
-                    classification requests. It is never logged or saved on the server. Leaving this blank
-                    uses the server-configured key when one is set.
+                    sent to this server with each classification request and forwarded to OpenAI only for the
+                    fallback classification requests. It is never logged or saved on the server. Leaving this
+                    blank uses the server-configured key when one is set.
                   </p>
                   <div className={styles.toggleRow}>
                     <label className="checkbox" htmlFor="remember-key-toggle">
@@ -542,9 +528,16 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
-                <button className="button is-primary" onClick={startScan} disabled={isStarting || currentStatus === "running"}>
-                  {currentStatus === "running" ? "Scanning..." : "Start scan"}
-                </button>
+                <div className="buttons">
+                  <button className="button is-primary" onClick={startScan} disabled={isScanning}>
+                    {isScanning ? "Scanning..." : processed > 0 && processed < total ? "Resume scan" : "Start scan"}
+                  </button>
+                  {isScanning && (
+                    <button className="button is-light" onClick={stopScan}>
+                      Stop scan
+                    </button>
+                  )}
+                </div>
                 {statusMessage && <p className="mt-3 has-text-info">{statusMessage}</p>}
               </div>
             </div>
@@ -566,11 +559,11 @@ export default function Home() {
                   </div>
                   <div className="is-flex is-justify-content-space-between">
                     <dt>Client-only</dt>
-                    <dd>{sessionSummary?.clientOnly.length ?? 0}</dd>
+                    <dd>{clientOnly.length}</dd>
                   </div>
                   <div className="is-flex is-justify-content-space-between">
                     <dt>Unknown</dt>
-                    <dd>{sessionSummary?.unknown.length ?? 0}</dd>
+                    <dd>{unknown.length}</dd>
                   </div>
                 </dl>
               </div>
@@ -578,8 +571,8 @@ export default function Home() {
               <div className="box mt-4">
                 <h3 className="title is-6">Live log</h3>
                 <div className={styles.logPanel}>
-                  {logs.map((log) => (
-                    <div key={`${log.timestamp}-${log.message}-${log.category}`} className={styles.logLine}>
+                  {logs.map((log, index) => (
+                    <div key={`${log.timestamp}-${index}`} className={styles.logLine}>
                       <span className="tag is-light mr-2">{log.category}</span>
                       <span className={styles.logMessage}>{log.message}</span>
                       <span className={styles.logTime}>{formatTimestamp(log.timestamp)}</span>
@@ -597,7 +590,7 @@ export default function Home() {
                 <h3 className="title is-5">Client-only mods</h3>
                 <p className="is-size-7 has-text-grey">Keep these on your personal client. Do not upload to the server.</p>
                 <ul className={styles.resultList}>
-                  {(sessionSummary?.clientOnly ?? []).map((jar) => (
+                  {clientOnly.map((jar) => (
                     <li key={jar}>
                       <span>{jar}</span>
                       <span className="tag is-primary is-light">CLIENT</span>
@@ -605,26 +598,16 @@ export default function Home() {
                   ))}
                 </ul>
                 <div className={`${styles.downloadActions} mt-3`}>
-                  <a
-                    className="button is-small is-link"
-                    href={sessionId ? `/api/sessions/${sessionId}/download?type=client` : "#"}
-                    aria-disabled={!sessionId}
-                    tabIndex={!sessionId ? -1 : undefined}
-                  >
+                  <button className="button is-small is-link" onClick={() => downloadList("client", "txt")}>
                     Download TXT
-                  </a>
-                  <a
-                    className="button is-small is-link is-light"
-                    href={sessionId ? `/api/sessions/${sessionId}/download?type=client&format=zip` : "#"}
-                    aria-disabled={!sessionId}
-                    tabIndex={!sessionId ? -1 : undefined}
-                  >
+                  </button>
+                  <button className="button is-small is-link is-light" onClick={() => downloadList("client", "zip")}>
                     Download ZIP bundle
-                  </a>
+                  </button>
                   <button
                     className="button is-small"
-                    onClick={() => copyList(sessionSummary?.clientOnly ?? [], "Client-only")}
-                    disabled={!sessionSummary?.clientOnly.length}
+                    onClick={() => copyList(clientOnly, "Client-only")}
+                    disabled={!clientOnly.length}
                   >
                     Copy to clipboard
                   </button>
@@ -636,7 +619,7 @@ export default function Home() {
                 <h3 className="title is-5">Unknown mods</h3>
                 <p className="is-size-7 has-text-grey">Review these manually. Install on server only when you confirm requirements.</p>
                 <ul className={styles.resultList}>
-                  {(sessionSummary?.unknown ?? []).map((jar) => (
+                  {unknown.map((jar) => (
                     <li key={jar}>
                       <span>{jar}</span>
                       <span className="tag is-dark is-light">UNKNOWN</span>
@@ -644,26 +627,16 @@ export default function Home() {
                   ))}
                 </ul>
                 <div className={`${styles.downloadActions} mt-3`}>
-                  <a
-                    className="button is-small is-link is-light"
-                    href={sessionId ? `/api/sessions/${sessionId}/download?type=unknown` : "#"}
-                    aria-disabled={!sessionId}
-                    tabIndex={!sessionId ? -1 : undefined}
-                  >
+                  <button className="button is-small is-link is-light" onClick={() => downloadList("unknown", "txt")}>
                     Download TXT
-                  </a>
-                  <a
-                    className="button is-small is-dark"
-                    href={sessionId ? `/api/sessions/${sessionId}/download?type=unknown&format=zip` : "#"}
-                    aria-disabled={!sessionId}
-                    tabIndex={!sessionId ? -1 : undefined}
-                  >
+                  </button>
+                  <button className="button is-small is-dark" onClick={() => downloadList("unknown", "zip")}>
                     Download ZIP bundle
-                  </a>
+                  </button>
                   <button
                     className="button is-small"
-                    onClick={() => copyList(sessionSummary?.unknown ?? [], "Unknown")}
-                    disabled={!sessionSummary?.unknown.length}
+                    onClick={() => copyList(unknown, "Unknown")}
+                    disabled={!unknown.length}
                   >
                     Copy to clipboard
                   </button>
@@ -677,7 +650,7 @@ export default function Home() {
             <ol className={styles.nextSteps}>
               <li>Upload only non-client mods to your new server instance.</li>
               <li>Distribute the client-only pack to players joining the server.</li>
-              <li>Re-run this scanner whenever you add new mods. Progress persists per session.</li>
+              <li>Re-run this scanner whenever you add new mods. Your list and results stay saved in this browser until you reset the workspace.</li>
             </ol>
           </div>
         </div>

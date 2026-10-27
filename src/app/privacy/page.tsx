@@ -18,14 +18,14 @@ export default function PrivacyPolicyPage() {
           <p>
             The Fabric Mod Client Detector does not collect, store, or transmit your Minecraft mods or
             world data. When you supply a mods folder, only the file names of <code>.jar</code> files are
-            read in the browser and sent to the backend so that the automated scanner can query public
-            search engines and request AI classifications.
+            read in the browser and sent, one at a time, to the backend so it can query the Modrinth API
+            and, when needed, search results and AI classification.
           </p>
           <p>
-            We generate intermediate state files (classification results, logs, and progress markers) on the
-            hosting server so a scan can resume after a refresh. These state files never include the actual
-            mod JARs. On the hosted deployment they live in temporary server storage and can be cleared when
-            the hosting instance recycles, so a resumed session is best effort, not a permanent archive.
+            The server is stateless and keeps nothing: no accounts, no scan database, no files. Your mod
+            list and your classification results live only in your browser&apos;s <code>localStorage</code>,
+            which is also what lets a scan resume after a refresh. Resetting the workspace or clearing
+            your browser data deletes them.
           </p>
         </section>
 
@@ -55,9 +55,9 @@ export default function PrivacyPolicyPage() {
         <section className="box mt-5">
           <h2 className="title is-5">Cookies &amp; Storage</h2>
           <p>
-            We do not set tracking cookies. Session state lives on the server in isolated directories that can be
-            removed once you finish migrating your world. Browser-side storage is limited to the API key (when
-            you opt in) and a session identifier so that scans remain resumable after refresh.
+            We do not set tracking cookies. Browser-side storage holds your mod list, your classification
+            results, and the API key (only when you opt in to remembering it), so scans remain resumable
+            after refresh. Nothing about your scan is stored on the server.
           </p>
         </section>
 

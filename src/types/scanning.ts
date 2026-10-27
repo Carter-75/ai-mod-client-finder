@@ -1,7 +1,5 @@
 export type Verdict = "CLIENT" | "SERVER" | "BOTH" | "UNKNOWN";
 
-export type SessionStatus = "idle" | "running" | "completed" | "error";
-
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogCategory =
   | "session"
@@ -21,24 +19,10 @@ export interface LogEntry {
   timestamp: string;
 }
 
-export interface ProgressSnapshot {
-  processed: number;
-  total: number;
-  status: SessionStatus;
-  lastJar?: string;
+export interface ClassifyResponse {
+  jar: string;
+  verdict: Verdict;
+  logs: LogEntry[];
+  keyRejected: boolean;
+  aiAvailable: boolean;
 }
-
-export interface SessionSummary extends ProgressSnapshot {
-  id: string;
-  jarNames: string[];
-  clientOnly: string[];
-  unknown: string[];
-  state: Record<string, Verdict>;
-}
-
-export type ScanEvent =
-  | { type: "log"; payload: LogEntry }
-  | { type: "progress"; payload: ProgressSnapshot }
-  | { type: "status"; payload: SessionStatus }
-  | { type: "result"; payload: { jar: string; verdict: Verdict } }
-  | { type: "snapshot"; payload: SessionSummary };
